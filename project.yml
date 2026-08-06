@@ -1,0 +1,57 @@
+name: XRCam
+
+options:
+  bundleIdPrefix: dev.ryanmj
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.9"
+    # Signing is deliberately disabled: CI emits an unsigned .ipa and
+    # Sideloadly signs it on Windows with your Apple ID.
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+
+targets:
+  XRCam:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: Sources
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.ryanmj.xrcam
+        PRODUCT_NAME: XRCam
+        TARGETED_DEVICE_FAMILY: "1"   # iPhone only
+        INFOPLIST_KEY_UIStatusBarHidden: "YES"
+
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: XRCam
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+
+        # Required before any AVCaptureSession work (M1+). Present now so the
+        # permission strings are never the thing that breaks a build later.
+        NSCameraUsageDescription: >-
+          XRCam uses the camera to capture and stream video to your computer.
+        NSMicrophoneUsageDescription: >-
+          XRCam uses the microphone to capture audio alongside video.
+
+        # A camera app must never letterbox, and must not sleep mid-stream.
+        UILaunchScreen: {}
+        UIRequiresFullScreen: true
+        UIStatusBarHidden: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight

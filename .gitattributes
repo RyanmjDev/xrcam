@@ -1,0 +1,7 @@
+# Authored on Windows, built on a macOS runner. Force LF on everything the
+# runner executes or parses — CRLF leaking into a shell block inside build.yml
+# produces confusing failures on macOS.
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.ipa binary

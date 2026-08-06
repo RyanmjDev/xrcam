@@ -1,0 +1,69 @@
+name: Build unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# macOS runners bill at a 10x multiplier against the Actions allowance.
+# Cancel superseded runs so a rapid series of pushes costs one build, not five.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Show build environment
+        run: |
+          xcodebuild -version
+          xcodebuild -project XRCam.xcodeproj -list
+
+      # Signing is intentionally disabled. Sideloadly re-signs on Windows with
+      # your Apple ID, which avoids managing certificates and provisioning
+      # profiles in CI entirely.
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project XRCam.xcodeproj \
+            -scheme XRCam \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      # An .ipa is just a zip containing a Payload/ directory.
+      - name: Package .ipa
+        run: |
+          APP="build/Build/Products/Release-iphoneos/XRCam.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::Build produced no .app at $APP"
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry XRCam.ipa Payload
+          ls -lh XRCam.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: XRCam-ipa
+          path: XRCam.ipa
+          if-no-files-found: error
+          retention-days: 30
