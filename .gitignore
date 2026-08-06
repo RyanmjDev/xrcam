@@ -5,6 +5,7 @@
 build/
 DerivedData/
 Payload/
+dist/
 *.ipa
 *.dSYM.zip
 

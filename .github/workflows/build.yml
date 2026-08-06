@@ -15,6 +15,10 @@ concurrency:
 jobs:
   build:
     runs-on: macos-latest
+    # The build itself takes ~30s. A job sitting far past that is stuck waiting
+    # on runner allocation, not compiling — fail fast instead of holding the
+    # concurrency group open.
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4

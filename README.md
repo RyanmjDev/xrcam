@@ -47,8 +47,10 @@ ingests `tcp://` natively.
 
 ## Build and install loop
 
-There is no iOS Simulator on Windows, so every change goes through CI. Budget
-5–10 minutes per iteration.
+There is no iOS Simulator on Windows, so every change goes through CI. Measured
+turnaround is **~30 seconds** of runner time (14s of that is the actual compile),
+plus however long the job waits for a free macOS runner. The wait, not the build,
+is what varies.
 
 1. **Push to `main`** (or trigger *Build unsigned IPA* manually from the Actions tab).
 2. **Download the `XRCam-ipa` artifact** from the completed run.
