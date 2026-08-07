@@ -81,10 +81,38 @@ month. The workflow cancels superseded runs to avoid wasting them.
 3. In OBS: **Sources → + → Media Source**
    - Uncheck **Local File**
    - **Input:** `tcp://127.0.0.1:9000`
+   - **Input Format:** `h264`
    - **FFmpeg Options:** `framerate=30`
    - Check **Restart playback when source becomes active**
 
-Order matters — the phone must be listening before OBS opens the source.
+**`Input Format` is not optional.** The stream is a raw H.264 elementary
+stream — no container, no header — so ffmpeg cannot probe what it is
+receiving. Left blank, OBS connects, fails to identify the format, and
+closes the socket. From the phone that is indistinguishable from OBS never
+having connected at all.
+
+Two other things that produce the same silent symptom:
+
+- The media source must be **in the active scene and visible**. OBS does not
+  open a source it is not rendering, so it never dials out.
+- The phone must be listening **before** OBS opens the source, or ffmpeg gets
+  connection-refused and gives up.
+
+### Verifying the stream without OBS
+
+To tell a phone-side problem from an OBS-side one, connect directly:
+
+```bash
+python tools/probe-stream.py
+```
+
+It reports throughput and a NAL histogram. A healthy 1080p30 stream shows
+~12 Mb/s, ~30 slices/second, and an `SPS → PPS → SEI → IDR` group every two
+seconds. If that looks right, the phone, the encoder and `iproxy` are all
+fine and the problem is in OBS.
+
+Note the app serves **one client at a time** — do not run the probe while OBS
+is connected, or they will contend for the same socket.
 
 ---
 
