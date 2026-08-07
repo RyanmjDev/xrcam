@@ -104,8 +104,12 @@ final class CaptureEngine: NSObject {
 
         if let connection = output.connection(with: .video) {
             connection.videoOrientation = .landscapeRight
+            // Stabilization is explicitly OFF. iOS stabilizes by buffering
+            // frames for lookahead, which shows up as capture latency before
+            // a single byte reaches the encoder. For a tripod/desk-mounted
+            // streaming camera, latency is worth more than smoothing.
             if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = .standard
+                connection.preferredVideoStabilizationMode = .off
             }
         }
     }

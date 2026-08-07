@@ -82,8 +82,9 @@ month. The workflow cancels superseded runs to avoid wasting them.
    - Uncheck **Local File**
    - **Input:** `tcp://127.0.0.1:9000`
    - **Input Format:** `h264`
-   - **FFmpeg Options:** `framerate=30 probesize=32 analyzeduration=0 fflags=nobuffer flags=low_delay`
-   - **Network Buffering:** drag to **minimum**
+   - **FFmpeg Options:** `framerate=30 probesize=32 analyzeduration=0 fflags=nobuffer flags=low_delay use_wallclock_as_timestamps=1`
+   - **Network Buffering:** `0 MB`
+   - **Use hardware decoding when available:** **unchecked**
    - Check **Restart playback when source becomes active**
 
 ### Latency
@@ -98,9 +99,37 @@ stream. The extra FFmpeg options above matter as much as the URL:
 | `analyzeduration=0` | Do not spend wall-clock time analysing before playback |
 | `fflags=nobuffer` | Do not buffer frames internally |
 | `flags=low_delay` | Ask the decoder not to hold frames back |
+| `use_wallclock_as_timestamps=1` | Stamp frames with their **arrival time** |
 
-**Network Buffering is a separate slider from the FFmpeg options** and is
-usually the single biggest contributor. Set it to the minimum.
+`use_wallclock_as_timestamps=1` deserves explanation, because it targets a
+failure mode the others do not: a **constant** delay that never drains. A raw
+elementary stream has no timestamps, so ffmpeg synthesizes them from
+`framerate`, counting from the first packet. Any data sitting in the pipeline
+when playback starts (TCP socket buffers on both machines, iproxy's internal
+buffer) then becomes a permanent offset — OBS renders every frame exactly that
+far behind forever, and no later option can claw it back. Wallclock stamping
+ties each frame to when it actually arrived instead, so OBS renders it
+immediately.
+
+Hardware decoding is unchecked because GPU decoders queue several frames
+internally; for a no-B-frame stream, software decode of 4K30 is light work
+and shaves the queue.
+
+**Network Buffering is a separate slider from the FFmpeg options** and must
+be `0 MB`.
+
+### Locating remaining lag
+
+```bash
+python tools/probe-stream.py --cadence
+```
+
+(Disable the OBS source first — eye icon off — the app serves one client at a
+time.) This timestamps every frame's arrival at the PC. If the median gap is
+~33 ms with low jitter, the phone, encoder, cable and iproxy are delivering on
+schedule and **any residual lag is inside OBS** — the reverse means the delay
+is upstream. This is the measurement to take before touching any more
+settings.
 
 **`Input Format` is not optional.** The stream is a raw H.264 elementary
 stream — no container, no header — so ffmpeg cannot probe what it is

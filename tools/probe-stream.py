@@ -27,6 +27,66 @@ NAL_NAMES = {
 START_CODE = b"\x00\x00\x00\x01"
 
 
+AUD = b"\x00\x00\x00\x01\x09"
+
+
+def cadence(host: str, port: int, seconds: float) -> int:
+    """Measure per-frame arrival timing.
+
+    Frames are delimited by the Access Unit Delimiter the app emits, so each
+    AUD sighting timestamps one frame's arrival at the PC. If frames arrive at
+    a steady ~33 ms with low jitter, the phone, encoder and iproxy are adding
+    no meaningful delay — and any lag seen on screen lives in OBS.
+    """
+    sock = socket.socket()
+    sock.settimeout(max(2.0, seconds + 2))
+    sock.connect((host, port))
+
+    arrivals = []
+    tail = b""
+    started = time.time()
+    try:
+        while time.time() - started < seconds:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            now = time.time()
+            data = tail + chunk
+            count = data.count(AUD)
+            arrivals.extend([now] * count)
+            tail = data[-8:]
+    except socket.timeout:
+        pass
+    finally:
+        sock.close()
+
+    if len(arrivals) < 10:
+        print(f"only {len(arrivals)} frames seen -- is the app streaming?")
+        return 1
+
+    gaps = [(b - a) * 1000 for a, b in zip(arrivals, arrivals[1:])]
+    gaps_sorted = sorted(gaps)
+    n = len(gaps_sorted)
+    span = arrivals[-1] - arrivals[0]
+
+    print(f"{len(arrivals)} frames in {span:.1f}s  ->  {(len(arrivals)-1)/span:.1f} fps effective")
+    print()
+    print("inter-frame arrival gaps (target ~33 ms at 30fps):")
+    print(f"  median  {gaps_sorted[n // 2]:6.1f} ms")
+    print(f"  p90     {gaps_sorted[int(n * 0.90)]:6.1f} ms")
+    print(f"  p99     {gaps_sorted[min(n - 1, int(n * 0.99))]:6.1f} ms")
+    print(f"  worst   {gaps_sorted[-1]:6.1f} ms")
+    print()
+
+    steady = gaps_sorted[n // 2] < 45 and gaps_sorted[int(n * 0.90)] < 70
+    if steady:
+        print("UPSTREAM CLEAN -- frames reach this machine on schedule.")
+        print("Any lag visible on screen is added by OBS, not the phone or the cable.")
+    else:
+        print("*** frames arrive in bursts -- delay is upstream of OBS ***")
+    return 0 if steady else 1
+
+
 def capture(host: str, port: int, seconds: float) -> bytes:
     sock = socket.socket()
     sock.settimeout(max(2.0, seconds + 2))
@@ -86,7 +146,21 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--seconds", type=float, default=4.0)
+    parser.add_argument("--cadence", action="store_true",
+                        help="measure per-frame arrival timing instead of "
+                             "stream structure")
     args = parser.parse_args()
+
+    if args.cadence:
+        try:
+            return cadence(args.host, args.port, max(args.seconds, 8.0))
+        except ConnectionRefusedError:
+            print(f"Connection refused on {args.host}:{args.port}.")
+            print("Is iproxy running, and is XRCam started on the phone?")
+            return 1
+        except OSError as exc:
+            print(f"Could not connect: {exc}")
+            return 1
 
     try:
         started = time.time()
