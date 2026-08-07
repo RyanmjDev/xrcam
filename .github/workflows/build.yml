@@ -71,6 +71,13 @@ jobs:
 
           echo "--- bundle contents ---"
           ls -la "$APP"
+
+          # Dump the processed plist — without this, a validation failure means
+          # guessing at what the build actually produced, and each guess costs
+          # a full round trip.
+          echo "--- processed Info.plist ---"
+          plutil -p "$APP/Info.plist"
+
           exit $fail
 
       # An .ipa is just a zip containing a Payload/ directory.

@@ -46,6 +46,11 @@ targets:
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
 
+        # Set explicitly rather than relying on actool's partial-plist merge.
+        # actool compiles Assets.car and emits the icon PNGs, but did not
+        # contribute this key, and iOS requires it.
+        CFBundleIconName: AppIcon
+
         # Required before any AVCaptureSession work (M1+). Present now so the
         # permission strings are never the thing that breaks a build later.
         NSCameraUsageDescription: >-
