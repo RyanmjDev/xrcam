@@ -44,6 +44,10 @@ final class CaptureEngine: NSObject {
     private let output = AVCaptureVideoDataOutput()
     private let fps: Int32 = 30
 
+    /// Exposed so manual controls can cap shutter at the frame interval —
+    /// exposure can never outlast one frame.
+    var frameDuration: CMTime { CMTime(value: 1, timescale: fps) }
+
     // MARK: - Configuration
 
     func configure(resolution: Resolution) throws {

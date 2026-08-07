@@ -16,6 +16,7 @@ final class StreamController: ObservableObject {
     @Published var resolution: CaptureEngine.Resolution = .hd1080
 
     let capture = CaptureEngine()
+    let controls = DeviceControls()
     private var encoder: H264Encoder?
     private let server = TCPVideoServer(port: 9000)
 
@@ -64,6 +65,13 @@ final class StreamController: ObservableObject {
         } catch {
             statusMessage = error.localizedDescription
             return
+        }
+
+        // Rebind after configuration: switching resolution replaces the active
+        // format, and any locked exposure/focus/WB has to be re-asserted
+        // against the new one.
+        if let device = capture.device {
+            controls.attach(to: device, frameDuration: capture.frameDuration)
         }
 
         self.encoder = encoder

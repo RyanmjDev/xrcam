@@ -3,6 +3,7 @@ import SwiftUI
 struct StreamView: View {
     @StateObject private var controller = StreamController()
     @State private var showDiagnostics = false
+    @State private var showControls = false
 
     var body: some View {
         ZStack {
@@ -11,10 +12,18 @@ struct StreamView: View {
             CameraPreview(session: controller.capture.session)
                 .ignoresSafeArea()
 
-            VStack {
-                topBar
-                Spacer()
-                bottomBar
+            HStack(alignment: .top, spacing: 0) {
+                if showControls {
+                    ControlsPanel(controls: controller.controls)
+                        .padding(.trailing, 16)
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+
+                VStack {
+                    topBar
+                    Spacer()
+                    bottomBar
+                }
             }
             .padding(20)
         }
@@ -90,6 +99,16 @@ struct StreamView: View {
 
     private var bottomBar: some View {
         HStack(spacing: 20) {
+            Button {
+                withAnimation(.easeOut(duration: 0.18)) { showControls.toggle() }
+            } label: {
+                Image(systemName: showControls ? "slider.horizontal.3" : "slider.horizontal.below.rectangle")
+                    .font(.title2)
+                    .foregroundStyle(showControls ? Color.accentColor : .white.opacity(0.8))
+                    .frame(width: 48, height: 48)
+                    .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+            }
+
             Picker("Resolution", selection: $controller.resolution) {
                 ForEach(CaptureEngine.Resolution.allCases) { option in
                     Text(option.rawValue).tag(option)
