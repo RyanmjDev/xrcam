@@ -13,3 +13,10 @@ dist/
 .DS_Store
 xcuserdata/
 *.xcuserstate
+
+# OBS plugin build output
+plugin/sdk/
+plugin/*.dll
+plugin/*.obj
+plugin/*.exp
+plugin/*.lib
