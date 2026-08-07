@@ -61,10 +61,21 @@ struct xrcam_src {
 	char host[128];
 	int port;
 
-	/* Camera controls, staged here by update() and sent by the worker.
-	 * The worker owns the socket; handing it the payload instead of
-	 * sending from the UI thread keeps all socket use on one thread. */
-	char control_json[512];
+	/* Camera controls, staged here by update() and serialised by the
+	 * worker. The worker owns the socket, so keeping all socket use on
+	 * one thread avoids sending from the UI thread. Stored as fields
+	 * rather than pre-rendered JSON because auto bitrate depends on the
+	 * negotiated resolution, which update() may not know yet. */
+	BOOL cam_exposure_auto;
+	int cam_iso;
+	int cam_shutter;
+	BOOL cam_focus_auto;
+	double cam_lens;
+	BOOL cam_wb_auto;
+	int cam_temp;
+	int cam_tint;
+	BOOL cam_bitrate_auto;
+	int cam_bitrate;
 	BOOL control_dirty;
 
 	/* worker thread */
@@ -91,6 +102,13 @@ struct xrcam_src {
 	 * as history without a copy: the buffers simply swap each frame. */
 	BOOL denoise_enabled;
 	float denoise_strength;
+	float denoise_threshold;
+
+	/* Colour signalling. Getting these wrong is not a matter of taste:
+	 * limited-range video decoded as full range lifts blacks to grey and
+	 * drops whites, which reads as a washed-out picture. */
+	BOOL color_full_range;
+	int color_space; /* 0 = Rec.709, 1 = Rec.601 */
 	uint8_t *nr_out;
 	uint8_t *nr_prev;
 	size_t nr_size;
@@ -121,12 +139,13 @@ static void flush_controls(struct xrcam_src *s, SOCKET sock);
  * decode removes the same noise -- and this machine has GPU/CPU headroom that
  * a 2018 phone already capturing and encoding 4K30 does not.
  */
-static void nr_build_table(struct xrcam_src *s, float strength)
+static void nr_build_table(struct xrcam_src *s, float strength, float threshold)
 {
 	/* Change below `threshold` is treated as pure noise; the response
-	 * fades to zero across `knee`, both in 8-bit units. */
-	const float threshold = 5.0f;
-	const float knee = 13.0f;
+	 * fades to zero across `knee`, both in 8-bit units. Raising the
+	 * threshold catches coarser noise at the cost of smearing slower
+	 * movement, so it is worth exposing rather than fixing. */
+	const float knee = threshold * 2.5f + 3.0f;
 
 	for (int d = 0; d < 256; d++) {
 		float motion = ((float)d - threshold) / knee;
@@ -136,7 +155,7 @@ static void nr_build_table(struct xrcam_src *s, float strength)
 		float retain = strength * (1.0f - motion);
 		s->nr_blend[d] = (uint8_t)(retain * 255.0f + 0.5f);
 	}
-	s->nr_built_for = strength;
+	s->nr_built_for = strength + threshold;
 }
 
 /* Returns the buffer to hand OBS: filtered, or `src` unchanged if disabled
@@ -146,6 +165,7 @@ static const uint8_t *nr_apply(struct xrcam_src *s, const uint8_t *src, size_t s
 	EnterCriticalSection(&s->lock);
 	BOOL enabled = s->denoise_enabled;
 	float strength = s->denoise_strength;
+	float threshold = s->denoise_threshold;
 	LeaveCriticalSection(&s->lock);
 
 	if (!enabled || size == 0) {
@@ -171,8 +191,8 @@ static const uint8_t *nr_apply(struct xrcam_src *s, const uint8_t *src, size_t s
 		return src;
 	}
 
-	if (s->nr_built_for != strength)
-		nr_build_table(s, strength);
+	if (s->nr_built_for != strength + threshold)
+		nr_build_table(s, strength, threshold);
 
 	const uint8_t *prev = s->nr_prev;
 	uint8_t *out = s->nr_out;
@@ -262,6 +282,13 @@ static HRESULT decoder_negotiate_output(struct xrcam_src *s)
 
 	XR_LOG(LOG_INFO, "decoder output: %ux%u (coded %ux%u), stride %ld",
 	       s->disp_w, s->disp_h, s->coded_w, s->coded_h, s->stride);
+
+	/* Auto bitrate is derived from resolution, which is only known now --
+	 * resend so a format change updates the phone. */
+	EnterCriticalSection(&s->lock);
+	s->control_dirty = TRUE;
+	LeaveCriticalSection(&s->lock);
+
 	return S_OK;
 }
 
@@ -353,7 +380,19 @@ static void output_frame(struct xrcam_src *s, IMFSample *sample)
 		frame.data[1] = (uint8_t *)pixels + plane_bytes;
 		frame.linesize[1] = (uint32_t)pitch;
 		frame.timestamp = os_gettime_ns();
-		video_format_get_parameters(VIDEO_CS_709, VIDEO_RANGE_PARTIAL,
+
+		EnterCriticalSection(&s->lock);
+		BOOL full = s->color_full_range;
+		int cs_choice = s->color_space;
+		LeaveCriticalSection(&s->lock);
+
+		enum video_colorspace cs = cs_choice == 1 ? VIDEO_CS_601 : VIDEO_CS_709;
+		enum video_range_type range = full ? VIDEO_RANGE_FULL : VIDEO_RANGE_PARTIAL;
+
+		/* full_range must agree with the matrix parameters below, or OBS
+		 * expands the levels twice and the picture goes flat. */
+		frame.full_range = full;
+		video_format_get_parameters(cs, range,
 		                            frame.color_matrix,
 		                            frame.color_range_min,
 		                            frame.color_range_max);
@@ -672,6 +711,22 @@ static const char *xrcam_get_name(void *unused)
 	return "XRCam USB Camera";
 }
 
+/* Bitrate the scene actually needs, from pixel count.
+ *
+ * Deliberately generous: USB 2.0 carries ~280 Mb/s, so the cable is never
+ * the constraint, and detailed scenes shimmer when starved long before they
+ * saturate the link. These are roughly double typical streaming figures,
+ * which target bandwidth cost we do not pay here. */
+static int auto_bitrate_mbps(uint32_t width, uint32_t height)
+{
+	uint64_t pixels = (uint64_t)width * height;
+	if (pixels == 0)          return 60;   /* not yet negotiated */
+	if (pixels >= 3840ull * 2160) return 80;
+	if (pixels >= 2560ull * 1440) return 50;
+	if (pixels >= 1920ull * 1080) return 30;
+	return 15;
+}
+
 static void xrcam_update(void *data, obs_data_t *settings)
 {
 	struct xrcam_src *s = data;
@@ -685,27 +740,26 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	memcpy(s->host, host, sizeof(host));
 	s->port = port;
 
-	/* Stage the camera state for the worker to send. */
-	snprintf(s->control_json, sizeof(s->control_json),
-	         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
-	         "\"focusAuto\":%s,\"lens\":%.3f,"
-	         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d,"
-	         "\"bitrateMbps\":%d}\n",
-	         obs_data_get_bool(settings, "exposure_auto") ? "true" : "false",
-	         (int)obs_data_get_int(settings, "iso"),
-	         (int)obs_data_get_int(settings, "shutter"),
-	         obs_data_get_bool(settings, "focus_auto") ? "true" : "false",
-	         obs_data_get_double(settings, "lens"),
-	         obs_data_get_bool(settings, "wb_auto") ? "true" : "false",
-	         (int)obs_data_get_int(settings, "temp"),
-	         (int)obs_data_get_int(settings, "tint"),
-	         (int)obs_data_get_int(settings, "bitrate"));
+	/* Stage the camera state for the worker to serialise and send. */
+	s->cam_exposure_auto = obs_data_get_bool(settings, "exposure_auto");
+	s->cam_iso = (int)obs_data_get_int(settings, "iso");
+	s->cam_shutter = (int)obs_data_get_int(settings, "shutter");
+	s->cam_focus_auto = obs_data_get_bool(settings, "focus_auto");
+	s->cam_lens = obs_data_get_double(settings, "lens");
+	s->cam_wb_auto = obs_data_get_bool(settings, "wb_auto");
+	s->cam_temp = (int)obs_data_get_int(settings, "temp");
+	s->cam_tint = (int)obs_data_get_int(settings, "tint");
+	s->cam_bitrate_auto = obs_data_get_bool(settings, "bitrate_auto");
+	s->cam_bitrate = (int)obs_data_get_int(settings, "bitrate");
 	s->control_dirty = TRUE;
 
-	/* Denoise runs locally, so it takes effect immediately rather than
+	/* These run locally, so they take effect immediately rather than
 	 * waiting on a round trip to the phone. */
 	s->denoise_enabled = obs_data_get_bool(settings, "denoise");
 	s->denoise_strength = (float)obs_data_get_double(settings, "denoise_strength");
+	s->denoise_threshold = (float)obs_data_get_double(settings, "denoise_threshold");
+	s->color_full_range = obs_data_get_bool(settings, "color_full_range");
+	s->color_space = (int)obs_data_get_int(settings, "color_space");
 	LeaveCriticalSection(&s->lock);
 
 	/* Only reconnect when the endpoint actually moved. Dropping the socket
@@ -721,13 +775,31 @@ static void xrcam_update(void *data, obs_data_t *settings)
  * the socket is only ever touched by one thread. */
 static void flush_controls(struct xrcam_src *s, SOCKET sock)
 {
-	char json[sizeof(s->control_json)];
+	char json[512];
 
 	EnterCriticalSection(&s->lock);
 	BOOL dirty = s->control_dirty;
 	if (dirty) {
-		memcpy(json, s->control_json, sizeof(json));
 		s->control_dirty = FALSE;
+
+		/* Resolved here rather than in update(), because auto bitrate
+		 * depends on the negotiated resolution. */
+		int bitrate = s->cam_bitrate_auto
+			? auto_bitrate_mbps(s->disp_w, s->disp_h)
+			: s->cam_bitrate;
+
+		snprintf(json, sizeof(json),
+		         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
+		         "\"focusAuto\":%s,\"lens\":%.3f,"
+		         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d,"
+		         "\"bitrateMbps\":%d}\n",
+		         s->cam_exposure_auto ? "true" : "false",
+		         s->cam_iso, s->cam_shutter,
+		         s->cam_focus_auto ? "true" : "false",
+		         s->cam_lens,
+		         s->cam_wb_auto ? "true" : "false",
+		         s->cam_temp, s->cam_tint,
+		         bitrate);
 	}
 	LeaveCriticalSection(&s->lock);
 
@@ -785,9 +857,13 @@ static void xrcam_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "wb_auto", true);
 	obs_data_set_default_int(settings, "temp", 5200);
 	obs_data_set_default_int(settings, "tint", 0);
+	obs_data_set_default_bool(settings, "bitrate_auto", true);
 	obs_data_set_default_int(settings, "bitrate", 60);
 	obs_data_set_default_bool(settings, "denoise", false);
 	obs_data_set_default_double(settings, "denoise_strength", 0.6);
+	obs_data_set_default_double(settings, "denoise_threshold", 5.0);
+	obs_data_set_default_bool(settings, "color_full_range", false);
+	obs_data_set_default_int(settings, "color_space", 0);
 }
 
 /* Grey out a group's sliders while it is on auto. */
@@ -809,6 +885,10 @@ static bool on_auto_toggled(obs_properties_t *props, obs_property_t *prop,
 
 	bool denoise = obs_data_get_bool(settings, "denoise");
 	obs_property_set_enabled(obs_properties_get(props, "denoise_strength"), denoise);
+	obs_property_set_enabled(obs_properties_get(props, "denoise_threshold"), denoise);
+
+	bool bitrate_auto = obs_data_get_bool(settings, "bitrate_auto");
+	obs_property_set_enabled(obs_properties_get(props, "bitrate"), !bitrate_auto);
 
 	return true; /* refresh the dialog */
 }
@@ -826,11 +906,20 @@ static obs_properties_t *xrcam_get_properties(void *data)
 	/* USB 2.0 carries ~280 Mb/s, so the cable is never the limit here --
 	 * this is purely how many bits the scene is worth. Detailed frames
 	 * (shelving, posters, texture) shimmer when starved. */
+	p = obs_properties_add_bool(props, "bitrate_auto",
+	                            "Bitrate: Auto (recommended)");
+	obs_property_set_modified_callback(p, on_auto_toggled);
+	obs_property_set_long_description(p,
+		"Picks a generous bitrate from the negotiated resolution: 80 Mb/s "
+		"at 4K, 30 at 1080p. Deliberately about double typical streaming "
+		"figures, because bandwidth over USB is free and starving a "
+		"detailed scene is what causes shimmer.");
+
 	p = obs_properties_add_int_slider(props, "bitrate",
 	                                  "Bitrate (Mb/s)", 5, 120, 5);
 	obs_property_set_long_description(p,
 		"Raise until shimmering in fine detail stops. 4K wants 60+ on a "
-		"busy scene; 1080p is usually fine around 25.");
+		"busy scene; 1080p is usually fine around 30.");
 
 	/* Exposure. Ranges are deliberately generous -- the phone clamps to
 	 * whatever its active format actually accepts, so a wide slider is
@@ -876,6 +965,28 @@ static obs_properties_t *xrcam_get_properties(void *data)
 		"Higher removes more noise but takes longer to settle after "
 		"movement. 0.6 is a good starting point; above 0.85 slow pans "
 		"may smear.");
+
+	p = obs_properties_add_float_slider(props, "denoise_threshold",
+	                                    "NR Threshold", 1.0, 20.0, 0.5);
+	obs_property_set_long_description(p,
+		"How large a pixel change still counts as noise rather than "
+		"motion. Raise this if grain survives at high strength; lower it "
+		"if slow movement smears. 5 is the default.");
+
+	/* Colour signalling. Not taste -- a mismatch here is a real defect. */
+	p = obs_properties_add_bool(props, "color_full_range", "Full Colour Range");
+	obs_property_set_long_description(p,
+		"The phone sends limited range (black at 16, white at 235). If "
+		"the picture looks washed out -- lifted blacks, grey whites -- "
+		"the levels are being handled twice; toggle this to correct it.");
+
+	p = obs_properties_add_list(props, "color_space", "Colour Space",
+	                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, "Rec.709 (HD/4K)", 0);
+	obs_property_list_add_int(p, "Rec.601 (SD)", 1);
+	obs_property_set_long_description(p,
+		"Rec.709 is correct for HD and 4K. Rec.601 shifts hues -- try it "
+		"only if skin tones look wrong in a way white balance cannot fix.");
 
 	return props;
 }
