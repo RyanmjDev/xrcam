@@ -26,8 +26,16 @@ cl /nologo /std:c17 /W3 /O2 /MD /LD ^
    /link sdk\obs.lib
 if errorlevel 1 exit /b 1
 
-set "DEST=%APPDATA%\obs-studio\plugins\xrcam-source\bin\64bit"
+REM ProgramData, NOT AppData\Roaming. On Windows OBS scans
+REM %ProgramData%\obs-studio\plugins\<name>\bin\64bit\<name>.dll -- the
+REM per-user AppData path is a macOS/Linux convention and is never scanned,
+REM so a DLL placed there is silently ignored with nothing in the log.
+set "DEST=%ProgramData%\obs-studio\plugins\xrcam-source\bin\64bit"
 if not exist "%DEST%" mkdir "%DEST%"
+if errorlevel 1 (
+    echo [!] Could not create "%DEST%" -- may need an elevated prompt.
+    exit /b 1
+)
 
 REM OBS locks the DLL while running; a failed copy here means close OBS first.
 copy /y xrcam-source.dll "%DEST%\xrcam-source.dll" >nul
