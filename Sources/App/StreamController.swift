@@ -16,9 +16,13 @@ final class StreamController: ObservableObject {
     @Published private(set) var bitrateMbps = 0.0
     @Published var resolution: CaptureEngine.Resolution = .hd1080
 
+    @Published var denoiseEnabled = false
+    @Published var denoiseStrength: Float = 0.6
+
     let capture = CaptureEngine()
     let controls = DeviceControls()
     private var encoder: H264Encoder?
+    private let denoiser = TemporalDenoiser()
     private let server = TCPVideoServer(port: 9000)
 
     private var statsTimer: Timer?
@@ -58,6 +62,12 @@ final class StreamController: ObservableObject {
             encoder?.setBitrate(bps)
             bitrateMbps = mbps
         }
+
+        if let value = message.denoise { denoiseEnabled = value }
+        if let value = message.denoiseStrength { denoiseStrength = value }
+        if message.denoise != nil || message.denoiseStrength != nil {
+            denoiser?.configure(enabled: denoiseEnabled, strength: denoiseStrength)
+        }
     }
 
     // MARK: - Control
@@ -88,8 +98,16 @@ final class StreamController: ObservableObject {
             self?.server.send(data, isKeyframe: isKeyframe)
         }
 
-        capture.onFrame = { [weak encoder] pixelBuffer, pts, duration in
-            encoder?.encode(pixelBuffer, pts: pts, duration: duration)
+        // Denoise ahead of the encoder: noise is incompressible, so cleaning
+        // it here both improves the picture and frees bits for real detail.
+        // The denoiser owns its own settings behind a lock, so this closure
+        // touches no main-actor state from the capture queue.
+        denoiser?.reset()
+        denoiser?.configure(enabled: denoiseEnabled, strength: denoiseStrength)
+
+        capture.onFrame = { [denoiser, weak encoder] pixelBuffer, pts, duration in
+            let frame = denoiser?.process(pixelBuffer) ?? pixelBuffer
+            encoder?.encode(frame, pts: pts, duration: duration)
         }
 
         do {

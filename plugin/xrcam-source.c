@@ -582,7 +582,8 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
 	         "\"focusAuto\":%s,\"lens\":%.3f,"
 	         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d,"
-	         "\"bitrateMbps\":%d}\n",
+	         "\"bitrateMbps\":%d,"
+	         "\"denoise\":%s,\"denoiseStrength\":%.2f}\n",
 	         obs_data_get_bool(settings, "exposure_auto") ? "true" : "false",
 	         (int)obs_data_get_int(settings, "iso"),
 	         (int)obs_data_get_int(settings, "shutter"),
@@ -591,7 +592,9 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	         obs_data_get_bool(settings, "wb_auto") ? "true" : "false",
 	         (int)obs_data_get_int(settings, "temp"),
 	         (int)obs_data_get_int(settings, "tint"),
-	         (int)obs_data_get_int(settings, "bitrate"));
+	         (int)obs_data_get_int(settings, "bitrate"),
+	         obs_data_get_bool(settings, "denoise") ? "true" : "false",
+	         obs_data_get_double(settings, "denoise_strength"));
 	s->control_dirty = TRUE;
 	LeaveCriticalSection(&s->lock);
 
@@ -671,6 +674,8 @@ static void xrcam_get_defaults(obs_data_t *settings)
 	obs_data_set_default_int(settings, "temp", 5200);
 	obs_data_set_default_int(settings, "tint", 0);
 	obs_data_set_default_int(settings, "bitrate", 60);
+	obs_data_set_default_bool(settings, "denoise", false);
+	obs_data_set_default_double(settings, "denoise_strength", 0.6);
 }
 
 /* Grey out a group's sliders while it is on auto. */
@@ -689,6 +694,9 @@ static bool on_auto_toggled(obs_properties_t *props, obs_property_t *prop,
 	bool wb_auto = obs_data_get_bool(settings, "wb_auto");
 	obs_property_set_enabled(obs_properties_get(props, "temp"), !wb_auto);
 	obs_property_set_enabled(obs_properties_get(props, "tint"), !wb_auto);
+
+	bool denoise = obs_data_get_bool(settings, "denoise");
+	obs_property_set_enabled(obs_properties_get(props, "denoise_strength"), denoise);
 
 	return true; /* refresh the dialog */
 }
@@ -740,6 +748,22 @@ static obs_properties_t *xrcam_get_properties(void *data)
 	obs_properties_add_int_slider(props, "temp", "Temperature (K)",
 	                              2000, 10000, 50);
 	obs_properties_add_int_slider(props, "tint", "Tint", -150, 150, 1);
+
+	/* Noise reduction, applied on the phone before encoding. */
+	p = obs_properties_add_bool(props, "denoise", "Noise Reduction");
+	obs_property_set_modified_callback(p, on_auto_toggled);
+	obs_property_set_long_description(p,
+		"Temporal denoise on the phone, before encoding. Averages each "
+		"pixel with its own history where the image is static, so sensor "
+		"noise cancels while detail is untouched. Moving areas pass "
+		"through unfiltered to avoid trailing.");
+
+	p = obs_properties_add_float_slider(props, "denoise_strength",
+	                                    "NR Strength", 0.0, 0.95, 0.05);
+	obs_property_set_long_description(p,
+		"Higher removes more noise but takes longer to settle after "
+		"movement. 0.6 is a good starting point; above 0.85 slow pans "
+		"may smear.");
 
 	return props;
 }
