@@ -109,15 +109,25 @@ struct StreamView: View {
                     .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
             }
 
+            // Format changes require reconfiguring the session, so both are
+            // only offered while stopped.
             Picker("Resolution", selection: $controller.resolution) {
                 ForEach(CaptureEngine.Resolution.allCases) { option in
                     Text(option.rawValue).tag(option)
                 }
             }
             .pickerStyle(.segmented)
-            .frame(width: 180)
-            // Format changes require reconfiguring the session, so they are
-            // only offered while stopped.
+            .frame(width: 150)
+            .disabled(controller.isRunning)
+            .opacity(controller.isRunning ? 0.4 : 1)
+
+            Picker("Frame rate", selection: $controller.frameRate) {
+                ForEach(CaptureEngine.FrameRate.allCases) { option in
+                    Text(option.label).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 150)
             .disabled(controller.isRunning)
             .opacity(controller.isRunning ? 0.4 : 1)
 

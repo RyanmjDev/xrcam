@@ -15,6 +15,7 @@ final class StreamController: ObservableObject {
     @Published private(set) var megabitsPerSecond = 0.0
     @Published private(set) var bitrateMbps = 0.0
     @Published var resolution: CaptureEngine.Resolution = .hd1080
+    @Published var frameRate: CaptureEngine.FrameRate = .fps30
 
     let capture = CaptureEngine()
     let controls = DeviceControls()
@@ -72,15 +73,16 @@ final class StreamController: ObservableObject {
         }
 
         let dimensions = resolution.dimensions
+        let fps = frameRate.rawValue
         // Keep a bitrate already dialled in from OBS across a restart.
         let targetBitrate = bitrateMbps > 0
             ? Int(bitrateMbps * 1_000_000)
-            : resolution.defaultBitrate
+            : resolution.defaultBitrate(fps: fps)
         bitrateMbps = Double(targetBitrate) / 1_000_000
 
         let encoder = H264Encoder(width: dimensions.width,
                                   height: dimensions.height,
-                                  fps: 30,
+                                  fps: fps,
                                   bitrate: targetBitrate)
 
         // Encoded frames go straight to the socket. The transport decides what
@@ -99,7 +101,7 @@ final class StreamController: ObservableObject {
         }
 
         do {
-            try capture.configure(resolution: resolution)
+            try capture.configure(resolution: resolution, frameRate: frameRate)
             try encoder.start()
         } catch {
             statusMessage = error.localizedDescription

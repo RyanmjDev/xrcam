@@ -97,6 +97,11 @@ struct xrcam_src {
 	uint64_t stat_ns_total;
 	uint32_t stat_frames;
 	uint64_t frame_received_ns;
+	uint64_t stat_window_start_ns;
+
+	/* Measured frame rate, so auto bitrate tracks 60fps without the phone
+	 * having to announce it. */
+	float measured_fps;
 
 	/* Temporal denoise. Double-buffered so the filtered result feeds back
 	 * as history without a copy: the buffers simply swap each frame. */
@@ -399,14 +404,36 @@ static void output_frame(struct xrcam_src *s, IMFSample *sample)
 		obs_source_output_video(s->source, &frame);
 
 		if (s->frame_received_ns) {
-			s->stat_ns_total += os_gettime_ns() - s->frame_received_ns;
+			uint64_t now = os_gettime_ns();
+			s->stat_ns_total += now - s->frame_received_ns;
+			if (s->stat_window_start_ns == 0)
+				s->stat_window_start_ns = now;
+
 			if (++s->stat_frames >= 300) {
+				double span_s =
+					(double)(now - s->stat_window_start_ns) / 1e9;
+				float fps = span_s > 0
+					? (float)(s->stat_frames / span_s) : 0.0f;
+
+				EnterCriticalSection(&s->lock);
+				/* Only resend when the rate crosses the band that
+				 * changes the auto bitrate — otherwise every stats
+				 * window would push controls to the phone. */
+				BOOL was_high = s->measured_fps > 45.0f;
+				BOOL now_high = fps > 45.0f;
+				s->measured_fps = fps;
+				if (was_high != now_high && s->cam_bitrate_auto)
+					s->control_dirty = TRUE;
+				LeaveCriticalSection(&s->lock);
+
 				XR_LOG(LOG_INFO,
-				       "decode+output latency: %.1f ms avg over %u frames",
+				       "decode+output latency: %.1f ms avg, %.1f fps",
 				       (double)s->stat_ns_total / s->stat_frames / 1e6,
-				       s->stat_frames);
+				       fps);
+
 				s->stat_ns_total = 0;
 				s->stat_frames = 0;
+				s->stat_window_start_ns = 0;
 			}
 		}
 	}
@@ -717,14 +744,23 @@ static const char *xrcam_get_name(void *unused)
  * the constraint, and detailed scenes shimmer when starved long before they
  * saturate the link. These are roughly double typical streaming figures,
  * which target bandwidth cost we do not pay here. */
-static int auto_bitrate_mbps(uint32_t width, uint32_t height)
+static int auto_bitrate_mbps(uint32_t width, uint32_t height, float fps)
 {
 	uint64_t pixels = (uint64_t)width * height;
-	if (pixels == 0)          return 60;   /* not yet negotiated */
-	if (pixels >= 3840ull * 2160) return 80;
-	if (pixels >= 2560ull * 1440) return 50;
-	if (pixels >= 1920ull * 1080) return 30;
-	return 15;
+	int base;
+
+	if (pixels == 0)                   base = 60; /* not yet negotiated */
+	else if (pixels >= 3840ull * 2160) base = 80;
+	else if (pixels >= 2560ull * 1440) base = 50;
+	else if (pixels >= 1920ull * 1080) base = 30;
+	else                               base = 15;
+
+	/* Doubling the rate does not double the requirement: consecutive
+	 * frames are more alike at 60fps, so each costs fewer bits. */
+	if (fps > 45.0f)
+		base = base * 3 / 2;
+
+	return base;
 }
 
 static void xrcam_update(void *data, obs_data_t *settings)
@@ -785,7 +821,7 @@ static void flush_controls(struct xrcam_src *s, SOCKET sock)
 		/* Resolved here rather than in update(), because auto bitrate
 		 * depends on the negotiated resolution. */
 		int bitrate = s->cam_bitrate_auto
-			? auto_bitrate_mbps(s->disp_w, s->disp_h)
+			? auto_bitrate_mbps(s->disp_w, s->disp_h, s->measured_fps)
 			: s->cam_bitrate;
 
 		snprintf(json, sizeof(json),

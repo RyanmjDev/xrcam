@@ -27,11 +27,16 @@ final class CaptureEngine: NSObject {
         /// offers roughly 280 Mb/s, so bitrate was never the constraint.
         /// Detailed scenes genuinely need this many bits; starving them is
         /// what produces shimmering artefacts in fine texture.
-        var defaultBitrate: Int {
+        ///
+        /// Doubling the frame rate does not double the requirement —
+        /// consecutive frames are more alike at 60fps, so each costs less.
+        func defaultBitrate(fps: Int32) -> Int {
+            let base: Int
             switch self {
-            case .hd1080: return 25_000_000
-            case .uhd4K:  return 60_000_000
+            case .hd1080: base = 25_000_000
+            case .uhd4K:  base = 60_000_000
             }
+            return fps >= 60 ? base * 3 / 2 : base
         }
     }
 
@@ -42,9 +47,19 @@ final class CaptureEngine: NSObject {
     private(set) var device: AVCaptureDevice?
     private(set) var activeResolution: Resolution = .hd1080
 
+    enum FrameRate: Int32, CaseIterable, Identifiable {
+        case fps30 = 30
+        case fps60 = 60
+
+        var id: Int32 { rawValue }
+        var label: String { "\(rawValue)fps" }
+    }
+
     private let sessionQueue = DispatchQueue(label: "dev.ryanmj.xrcam.capture")
     private let output = AVCaptureVideoDataOutput()
-    private let fps: Int32 = 30
+    private(set) var frameRate: FrameRate = .fps30
+
+    var fps: Int32 { frameRate.rawValue }
 
     /// Exposed so manual controls can cap shutter at the frame interval —
     /// exposure can never outlast one frame.
@@ -52,8 +67,9 @@ final class CaptureEngine: NSObject {
 
     // MARK: - Configuration
 
-    func configure(resolution: Resolution) throws {
+    func configure(resolution: Resolution, frameRate: FrameRate) throws {
         activeResolution = resolution
+        self.frameRate = frameRate
 
         session.beginConfiguration()
         defer { session.commitConfiguration() }
@@ -81,7 +97,7 @@ final class CaptureEngine: NSObject {
                                            width: target.width,
                                            height: target.height,
                                            fps: Double(fps)) else {
-            throw CaptureError.formatUnavailable(resolution.rawValue)
+            throw CaptureError.formatUnavailable("\(resolution.rawValue) \(frameRate.label)")
         }
 
         try device.lockForConfiguration()
