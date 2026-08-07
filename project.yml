@@ -33,6 +33,12 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"   # iPhone only
         INFOPLIST_KEY_UIStatusBarHidden: "YES"
 
+        # Apps built against the iOS 11+ SDK must ship icons in an asset
+        # catalog. Setting this makes actool compile Assets.car and inject
+        # CFBundleIconName; without it the bundle carries no resources at all
+        # and the device rejects the install as an invalid file.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+
     info:
       path: Sources/App/Info.plist
       properties:

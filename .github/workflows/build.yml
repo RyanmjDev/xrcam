@@ -51,6 +51,28 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
 
+      # A bundle with no compiled asset catalog and no CFBundleIconName is
+      # rejected by the device at install time as an invalid file — and the
+      # xcodebuild step still reports success, so it has to be caught here.
+      - name: Validate app bundle
+        run: |
+          APP="build/Build/Products/Release-iphoneos/XRCam.app"
+          fail=0
+
+          if [ ! -f "$APP/Assets.car" ]; then
+            echo "::error::Assets.car missing — asset catalog was not compiled"
+            fail=1
+          fi
+
+          if ! plutil -extract CFBundleIconName raw "$APP/Info.plist" >/dev/null 2>&1; then
+            echo "::error::CFBundleIconName missing from Info.plist"
+            fail=1
+          fi
+
+          echo "--- bundle contents ---"
+          ls -la "$APP"
+          exit $fail
+
       # An .ipa is just a zip containing a Payload/ directory.
       - name: Package .ipa
         run: |
