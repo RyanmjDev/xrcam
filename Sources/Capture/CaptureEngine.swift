@@ -22,13 +22,15 @@ final class CaptureEngine: NSObject {
             }
         }
 
-        /// Conservative starting points for the XR's A12. 4K is not simply 4x
-        /// the 1080p rate — beyond ~25 Mbps the gain is mostly invisible over a
-        /// cable while the encoder works considerably harder.
+        /// The earlier values were far too conservative. Measured throughput
+        /// over the cable was ~12 Mb/s with the link barely working — USB 2.0
+        /// offers roughly 280 Mb/s, so bitrate was never the constraint.
+        /// Detailed scenes genuinely need this many bits; starving them is
+        /// what produces shimmering artefacts in fine texture.
         var defaultBitrate: Int {
             switch self {
-            case .hd1080: return 12_000_000
-            case .uhd4K:  return 25_000_000
+            case .hd1080: return 25_000_000
+            case .uhd4K:  return 60_000_000
             }
         }
     }

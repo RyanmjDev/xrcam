@@ -17,4 +17,7 @@ struct ControlMessage: Decodable {
     var wbAuto: Bool?
     var temp: Float?
     var tint: Float?
+
+    /// Target encode bitrate in megabits per second.
+    var bitrateMbps: Double?
 }

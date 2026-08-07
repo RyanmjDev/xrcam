@@ -73,15 +73,20 @@ final class H264Encoder {
         set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
 
-        // Constrained Baseline, not High. AllowFrameReordering=false stops
-        // B-frames being *produced*, but a High-profile SPS with no VUI
-        // restriction still tells decoders reordering is *possible* — and a
-        // conforming decoder then buffers a level-derived DPB (up to ~16
-        // frames, >500ms at 30fps) before releasing anything. Constrained
-        // Baseline makes reordering impossible by definition, so every
-        // decoder runs at zero frame delay without needing side flags.
+        // High profile. Constrained Baseline was adopted while hunting the
+        // latency problem, to stop ffmpeg's decoder buffering for possible
+        // frame reordering — but the native OBS plugin decodes through Media
+        // Foundation with MF_LOW_LATENCY, which handles that explicitly. That
+        // makes Baseline pure cost: it lacks CABAC and the 8x8 transform, so
+        // it is roughly 15-20% less efficient at the same bitrate, which shows
+        // up as shimmering artefacts in fine detail.
         set(created, kVTCompressionPropertyKey_ProfileLevel,
-            kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel)
+            kVTProfileLevel_H264_High_AutoLevel)
+
+        // CABAC over CAVLC: ~10% fewer bits for the same picture. Only
+        // available outside Baseline, so it must follow the profile.
+        set(created, kVTCompressionPropertyKey_H264EntropyMode,
+            kVTH264EntropyMode_CABAC)
 
         // Emit every frame as soon as it is encoded. Without this the encoder
         // may hold frames back to make better rate-control decisions, which is
@@ -90,10 +95,13 @@ final class H264Encoder {
         set(created, kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         set(created, kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
 
-        // A keyframe every 2s bounds how long OBS waits for a decodable picture
-        // when a source is added or re-enabled mid-stream.
-        set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 2) as CFNumber)
-        set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2 as CFNumber)
+        // Keyframes are expensive — each one spends bits re-describing the
+        // whole picture that could have gone to detail. A client attaching
+        // triggers an immediate forced IDR (see requestKeyframe), so a long
+        // interval costs nothing in join latency and buys real quality on a
+        // detailed scene.
+        set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 5) as CFNumber)
+        set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 5 as CFNumber)
 
         VTCompressionSessionPrepareToEncodeFrames(created)
         session = created
@@ -109,6 +117,17 @@ final class H264Encoder {
     /// Request that the next encoded frame be an IDR.
     func requestKeyframe() {
         queue.async { self.forceKeyframeNext = true }
+    }
+
+    /// Change the target bitrate on a running session.
+    ///
+    /// Live-adjustable so quality can be dialled in from OBS against the real
+    /// scene, rather than guessed at build time.
+    func setBitrate(_ bitsPerSecond: Int) {
+        guard let session else { return }
+        VTSessionSetProperty(session,
+                             key: kVTCompressionPropertyKey_AverageBitRate,
+                             value: bitsPerSecond as CFNumber)
     }
 
     // MARK: - Encoding

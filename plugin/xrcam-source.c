@@ -581,7 +581,8 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	snprintf(s->control_json, sizeof(s->control_json),
 	         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
 	         "\"focusAuto\":%s,\"lens\":%.3f,"
-	         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d}\n",
+	         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d,"
+	         "\"bitrateMbps\":%d}\n",
 	         obs_data_get_bool(settings, "exposure_auto") ? "true" : "false",
 	         (int)obs_data_get_int(settings, "iso"),
 	         (int)obs_data_get_int(settings, "shutter"),
@@ -589,7 +590,8 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	         obs_data_get_double(settings, "lens"),
 	         obs_data_get_bool(settings, "wb_auto") ? "true" : "false",
 	         (int)obs_data_get_int(settings, "temp"),
-	         (int)obs_data_get_int(settings, "tint"));
+	         (int)obs_data_get_int(settings, "tint"),
+	         (int)obs_data_get_int(settings, "bitrate"));
 	s->control_dirty = TRUE;
 	LeaveCriticalSection(&s->lock);
 
@@ -668,6 +670,7 @@ static void xrcam_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "wb_auto", true);
 	obs_data_set_default_int(settings, "temp", 5200);
 	obs_data_set_default_int(settings, "tint", 0);
+	obs_data_set_default_int(settings, "bitrate", 60);
 }
 
 /* Grey out a group's sliders while it is on auto. */
@@ -699,6 +702,15 @@ static obs_properties_t *xrcam_get_properties(void *data)
 	obs_properties_add_int(props, "port", "Port", 1, 65535, 1);
 
 	obs_property_t *p;
+
+	/* USB 2.0 carries ~280 Mb/s, so the cable is never the limit here --
+	 * this is purely how many bits the scene is worth. Detailed frames
+	 * (shelving, posters, texture) shimmer when starved. */
+	p = obs_properties_add_int_slider(props, "bitrate",
+	                                  "Bitrate (Mb/s)", 5, 120, 5);
+	obs_property_set_long_description(p,
+		"Raise until shimmering in fine detail stops. 4K wants 60+ on a "
+		"busy scene; 1080p is usually fine around 25.");
 
 	/* Exposure. Ranges are deliberately generous -- the phone clamps to
 	 * whatever its active format actually accepts, so a wide slider is

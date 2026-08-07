@@ -13,6 +13,7 @@ final class StreamController: ObservableObject {
     @Published private(set) var framesSent = 0
     @Published private(set) var framesDropped = 0
     @Published private(set) var megabitsPerSecond = 0.0
+    @Published private(set) var bitrateMbps = 0.0
     @Published var resolution: CaptureEngine.Resolution = .hd1080
 
     let capture = CaptureEngine()
@@ -51,6 +52,12 @@ final class StreamController: ObservableObject {
         if let value = message.lens { controls.lensPosition = value }
         if let value = message.temp { controls.temperature = value }
         if let value = message.tint { controls.tint = value }
+
+        if let mbps = message.bitrateMbps, mbps > 0 {
+            let bps = Int(mbps * 1_000_000)
+            encoder?.setBitrate(bps)
+            bitrateMbps = mbps
+        }
     }
 
     // MARK: - Control
@@ -64,10 +71,16 @@ final class StreamController: ObservableObject {
         }
 
         let dimensions = resolution.dimensions
+        // Keep a bitrate already dialled in from OBS across a restart.
+        let targetBitrate = bitrateMbps > 0
+            ? Int(bitrateMbps * 1_000_000)
+            : resolution.defaultBitrate
+        bitrateMbps = Double(targetBitrate) / 1_000_000
+
         let encoder = H264Encoder(width: dimensions.width,
                                   height: dimensions.height,
                                   fps: 30,
-                                  bitrate: resolution.defaultBitrate)
+                                  bitrate: targetBitrate)
 
         // Encoded frames go straight to the socket. The transport decides what
         // to drop; the encoder never blocks on the network.
