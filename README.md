@@ -118,6 +118,15 @@ and shaves the queue.
 **Network Buffering is a separate slider from the FFmpeg options** and must
 be `0 MB`.
 
+### Unbuffered rendering
+
+OBS holds every decoded frame until its timestamp comes due, with smoothing
+on top — correct for file playback, pure latency for a live camera. Load
+`tools/xrcam-unbuffered.lua` via **Tools → Scripts → +** to flip the XRCam
+source to unbuffered rendering (newest frame shown immediately). Webcam
+sources expose this as a checkbox; the Media Source only allows it through
+the scripting API.
+
 ### Locating remaining lag
 
 ```bash

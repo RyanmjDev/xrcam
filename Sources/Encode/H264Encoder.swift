@@ -73,11 +73,20 @@ final class H264Encoder {
         set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
 
+        // Constrained Baseline, not High. AllowFrameReordering=false stops
+        // B-frames being *produced*, but a High-profile SPS with no VUI
+        // restriction still tells decoders reordering is *possible* — and a
+        // conforming decoder then buffers a level-derived DPB (up to ~16
+        // frames, >500ms at 30fps) before releasing anything. Constrained
+        // Baseline makes reordering impossible by definition, so every
+        // decoder runs at zero frame delay without needing side flags.
+        set(created, kVTCompressionPropertyKey_ProfileLevel,
+            kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel)
+
         // Emit every frame as soon as it is encoded. Without this the encoder
         // may hold frames back to make better rate-control decisions, which is
         // latency spent on quality we are not asking for.
         set(created, kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as CFNumber)
-        set(created, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
         set(created, kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         set(created, kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
 
