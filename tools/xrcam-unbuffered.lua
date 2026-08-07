@@ -13,12 +13,27 @@
 local obs = obslua
 
 local SOURCE_NAME = "XRCam"
+-- Log on state *transitions* only, so the OBS log carries proof the flag
+-- actually landed on a real source -- "script loaded" alone does not
+-- distinguish success from a silent name mismatch.
+local state = "unknown"  -- "applied" | "missing"
 
 local function apply()
     local source = obs.obs_get_source_by_name(SOURCE_NAME)
     if source ~= nil then
         obs.obs_source_set_async_unbuffered(source, true)
         obs.obs_source_release(source)
+        if state ~= "applied" then
+            state = "applied"
+            obs.script_log(obs.LOG_INFO,
+                "unbuffered rendering APPLIED to '" .. SOURCE_NAME .. "'")
+        end
+    else
+        if state ~= "missing" then
+            state = "missing"
+            obs.script_log(obs.LOG_WARNING,
+                "source '" .. SOURCE_NAME .. "' NOT FOUND -- flag not applied")
+        end
     end
 end
 

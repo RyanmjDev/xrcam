@@ -108,6 +108,32 @@ def capture(host: str, port: int, seconds: float) -> bytes:
     return bytes(buf)
 
 
+PROFILES = {66: "Baseline", 77: "Main", 88: "Extended", 100: "High"}
+
+
+def sps_profile(buf: bytes) -> str:
+    """Read profile/level out of the first SPS in the stream.
+
+    Confirms which encoder build the phone is actually running: the old build
+    sends High, the latency build sends Constrained Baseline.
+    """
+    offset = 0
+    while True:
+        found = buf.find(START_CODE, offset)
+        if found < 0 or found + 8 > len(buf):
+            return "no SPS found"
+        nal = found + 4
+        if buf[nal] & 0x1F == 7:  # SPS
+            profile_idc = buf[nal + 1]
+            constraints = buf[nal + 2]
+            level_idc = buf[nal + 3]
+            name = PROFILES.get(profile_idc, f"profile_idc {profile_idc}")
+            if profile_idc == 66 and constraints & 0x40:
+                name = "Constrained Baseline"
+            return f"{name} @ Level {level_idc / 10:.1f}"
+        offset = nal
+
+
 def analyse(buf: bytes, elapsed: float) -> bool:
     counts = collections.Counter()
     offset = 0
@@ -121,6 +147,7 @@ def analyse(buf: bytes, elapsed: float) -> bool:
 
     mbps = len(buf) * 8 / elapsed / 1e6 if elapsed else 0
     print(f"captured {len(buf)/1024:.0f} KiB in {elapsed:.1f}s  ->  {mbps:.1f} Mb/s")
+    print(f"encoder profile: {sps_profile(buf)}")
     print()
     print("NAL unit histogram:")
     for nal_type, count in sorted(counts.items()):
