@@ -19,7 +19,9 @@ if not defined VSROOT (
 )
 call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat" >nul
 
-cl /nologo /std:c17 /W3 /O2 /MD /LD ^
+REM /openmp parallelises the noise-reduction blend; at 4K it is 12.4 MB per
+REM frame and single-threaded it does not fit the frame budget.
+cl /nologo /std:c17 /W3 /O2 /MD /LD /openmp ^
    /Isdk\libobs /Isdk\config ^
    xrcam-source.c ^
    /Fe:xrcam-source.dll ^

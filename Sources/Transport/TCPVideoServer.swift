@@ -218,12 +218,17 @@ final class TCPVideoServer {
             if self.pendingFrames >= self.maxPendingFrames
                 || self.pendingBytes + data.count > self.maxPendingBytes {
                 self.framesDropped += 1
-                self.wasStalled = true
+                // Ask for an IDR on the way *into* the stall, not just on the
+                // way out. A dropped frame leaves the decoder without a
+                // reference immediately, so the sooner a keyframe is queued
+                // the shorter the visible corruption.
+                if !self.wasStalled {
+                    self.wasStalled = true
+                    self.onNeedsKeyframe?()
+                }
                 return
             }
 
-            // Coming out of a stall the decoder is mid-GOP and cannot resync
-            // until the next IDR, so ask for one immediately.
             if self.wasStalled {
                 self.wasStalled = false
                 self.onNeedsKeyframe?()

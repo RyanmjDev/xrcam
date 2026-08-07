@@ -95,13 +95,13 @@ final class H264Encoder {
         set(created, kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         set(created, kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
 
-        // Keyframes are expensive — each one spends bits re-describing the
-        // whole picture that could have gone to detail. A client attaching
-        // triggers an immediate forced IDR (see requestKeyframe), so a long
-        // interval costs nothing in join latency and buys real quality on a
-        // detailed scene.
-        set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 5) as CFNumber)
-        set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 5 as CFNumber)
+        // Two seconds, not five. Keyframes are expensive, but the interval
+        // also bounds how long corruption lasts: a frame dropped under load
+        // leaves the decoder without a reference until the next IDR. At five
+        // seconds a single drop produced seconds of visible blocking, which
+        // is a far worse trade than the bits a long GOP saves.
+        set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 2) as CFNumber)
+        set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2 as CFNumber)
 
         VTCompressionSessionPrepareToEncodeFrames(created)
         session = created

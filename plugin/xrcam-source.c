@@ -95,6 +95,7 @@ struct xrcam_src {
 	 * rather than guessed. Covers only this plugin's own contribution:
 	 * from "frame fully received" to "handed to OBS". */
 	uint64_t stat_ns_total;
+	uint64_t stat_nr_ns_total;
 	uint32_t stat_frames;
 	uint64_t frame_received_ns;
 	uint64_t stat_window_start_ns;
@@ -203,7 +204,14 @@ static const uint8_t *nr_apply(struct xrcam_src *s, const uint8_t *src, size_t s
 	uint8_t *out = s->nr_out;
 	const uint8_t *blend = s->nr_blend;
 
-	for (size_t i = 0; i < size; i++) {
+	/* Threaded: at 4K this is 12.4 MB per frame, and single-threaded it
+	 * alone consumed a large share of the 33ms budget. MSVC only provides
+	 * OpenMP 2.0, whose loop index must be a plain signed int — fine here,
+	 * since even 8K NV12 is far under 2 GB. */
+	const int n = (int)size;
+	int i;
+#pragma omp parallel for schedule(static)
+	for (i = 0; i < n; i++) {
 		int c = src[i];
 		int p = prev[i];
 		int d = p - c;
@@ -374,7 +382,9 @@ static void output_frame(struct xrcam_src *s, IMFSample *sample)
 		/* Y plane is coded_h rows; the interleaved UV plane below it is
 		 * half that, so NV12 totals 1.5x the luma height. */
 		size_t plane_bytes = (size_t)pitch * s->coded_h;
+		uint64_t nr_start = os_gettime_ns();
 		const uint8_t *pixels = nr_apply(s, scan0, plane_bytes * 3 / 2);
+		s->stat_nr_ns_total += os_gettime_ns() - nr_start;
 
 		struct obs_source_frame frame = {0};
 		frame.format = VIDEO_FORMAT_NV12;
@@ -426,12 +436,19 @@ static void output_frame(struct xrcam_src *s, IMFSample *sample)
 					s->control_dirty = TRUE;
 				LeaveCriticalSection(&s->lock);
 
+				double total_ms =
+					(double)s->stat_ns_total / s->stat_frames / 1e6;
+				double nr_ms =
+					(double)s->stat_nr_ns_total / s->stat_frames / 1e6;
+
 				XR_LOG(LOG_INFO,
-				       "decode+output latency: %.1f ms avg, %.1f fps",
-				       (double)s->stat_ns_total / s->stat_frames / 1e6,
-				       fps);
+				       "%.1f ms/frame (decode %.1f + NR %.1f), %.1f fps "
+				       "[budget %.1f ms]",
+				       total_ms, total_ms - nr_ms, nr_ms, fps,
+				       fps > 1.0f ? 1000.0 / fps : 0.0);
 
 				s->stat_ns_total = 0;
+				s->stat_nr_ns_total = 0;
 				s->stat_frames = 0;
 				s->stat_window_start_ns = 0;
 			}
@@ -759,6 +776,12 @@ static int auto_bitrate_mbps(uint32_t width, uint32_t height, float fps)
 	 * frames are more alike at 60fps, so each costs fewer bits. */
 	if (fps > 45.0f)
 		base = base * 3 / 2;
+
+	/* Hard cap. Beyond this the PC cannot decode 4K fast enough to keep
+	 * up, the phone's send queue backs up, and dropped frames produce
+	 * blocking that looks far worse than a lower bitrate ever would. */
+	if (base > 80)
+		base = 80;
 
 	return base;
 }
