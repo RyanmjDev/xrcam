@@ -86,10 +86,114 @@ struct xrcam_src {
 	uint64_t stat_ns_total;
 	uint32_t stat_frames;
 	uint64_t frame_received_ns;
+
+	/* Temporal denoise. Double-buffered so the filtered result feeds back
+	 * as history without a copy: the buffers simply swap each frame. */
+	BOOL denoise_enabled;
+	float denoise_strength;
+	uint8_t *nr_out;
+	uint8_t *nr_prev;
+	size_t nr_size;
+	uint8_t nr_blend[256]; /* change magnitude -> history weight, 0..255 */
+	float nr_built_for;    /* strength the table was built from */
 };
 
 /* Defined with the property handlers below, but used by the worker above it. */
 static void flush_controls(struct xrcam_src *s, SOCKET sock);
+
+/* ---------------------------------------------------------------- denoise */
+
+/*
+ * Motion-adaptive temporal denoise on decoded NV12.
+ *
+ * Sensor noise is random from frame to frame; a locked-off scene is not.
+ * Averaging a pixel against its own recent history therefore cancels noise
+ * while leaving stable detail alone -- unlike a spatial blur, which cannot
+ * tell noise from texture and softens both.
+ *
+ * The hazard is motion: blending a moving edge with its past smears it into a
+ * trail. So the blend weight falls to zero as a pixel's frame-to-frame change
+ * grows. Small change reads as noise and is averaged hard; large change reads
+ * as movement and passes straight through.
+ *
+ * Runs here rather than on the phone deliberately. At 60 Mbps the encoder
+ * reproduces noise faithfully rather than mangling it, so filtering after
+ * decode removes the same noise -- and this machine has GPU/CPU headroom that
+ * a 2018 phone already capturing and encoding 4K30 does not.
+ */
+static void nr_build_table(struct xrcam_src *s, float strength)
+{
+	/* Change below `threshold` is treated as pure noise; the response
+	 * fades to zero across `knee`, both in 8-bit units. */
+	const float threshold = 5.0f;
+	const float knee = 13.0f;
+
+	for (int d = 0; d < 256; d++) {
+		float motion = ((float)d - threshold) / knee;
+		if (motion < 0.0f) motion = 0.0f;
+		if (motion > 1.0f) motion = 1.0f;
+
+		float retain = strength * (1.0f - motion);
+		s->nr_blend[d] = (uint8_t)(retain * 255.0f + 0.5f);
+	}
+	s->nr_built_for = strength;
+}
+
+/* Returns the buffer to hand OBS: filtered, or `src` unchanged if disabled
+ * or unavailable. Filtering must never be able to break the stream. */
+static const uint8_t *nr_apply(struct xrcam_src *s, const uint8_t *src, size_t size)
+{
+	EnterCriticalSection(&s->lock);
+	BOOL enabled = s->denoise_enabled;
+	float strength = s->denoise_strength;
+	LeaveCriticalSection(&s->lock);
+
+	if (!enabled || size == 0) {
+		/* Invalidate history so re-enabling cannot blend against a frame
+		 * from minutes ago. Zeroing the size forces the reseed path,
+		 * which frees and reallocates. */
+		s->nr_size = 0;
+		return src;
+	}
+
+	if (s->nr_size != size) {
+		bfree(s->nr_out);
+		bfree(s->nr_prev);
+		s->nr_out = bmalloc(size);
+		s->nr_prev = bmalloc(size);
+		s->nr_size = size;
+		if (!s->nr_out || !s->nr_prev) {
+			s->nr_size = 0;
+			return src;
+		}
+		/* No history yet: seed it and pass this frame through. */
+		memcpy(s->nr_prev, src, size);
+		return src;
+	}
+
+	if (s->nr_built_for != strength)
+		nr_build_table(s, strength);
+
+	const uint8_t *prev = s->nr_prev;
+	uint8_t *out = s->nr_out;
+	const uint8_t *blend = s->nr_blend;
+
+	for (size_t i = 0; i < size; i++) {
+		int c = src[i];
+		int p = prev[i];
+		int d = p - c;
+		int mag = d < 0 ? -d : d;
+		/* out = c + (p - c) * retain */
+		out[i] = (uint8_t)(c + ((d * blend[mag]) >> 8));
+	}
+
+	/* The filtered result becomes next frame's history -- an IIR filter, so
+	 * noise keeps decaying across many frames instead of averaging two.
+	 * Swapping avoids copying 12 MB per frame at 4K. */
+	s->nr_prev = out;
+	s->nr_out = (uint8_t *)prev;
+	return s->nr_prev;
+}
 
 /* ---------------------------------------------------------------- decoder */
 
@@ -235,14 +339,18 @@ static void output_frame(struct xrcam_src *s, IMFSample *sample)
 	}
 
 	if (scan0 && s->disp_w && s->disp_h && pitch > 0) {
+		/* Y plane is coded_h rows; the interleaved UV plane below it is
+		 * half that, so NV12 totals 1.5x the luma height. */
+		size_t plane_bytes = (size_t)pitch * s->coded_h;
+		const uint8_t *pixels = nr_apply(s, scan0, plane_bytes * 3 / 2);
+
 		struct obs_source_frame frame = {0};
 		frame.format = VIDEO_FORMAT_NV12;
 		frame.width = s->disp_w;
 		frame.height = s->disp_h;
-		frame.data[0] = scan0;
+		frame.data[0] = (uint8_t *)pixels;
 		frame.linesize[0] = (uint32_t)pitch;
-		/* UV plane sits below the full coded-height Y plane. */
-		frame.data[1] = scan0 + (size_t)pitch * s->coded_h;
+		frame.data[1] = (uint8_t *)pixels + plane_bytes;
 		frame.linesize[1] = (uint32_t)pitch;
 		frame.timestamp = os_gettime_ns();
 		video_format_get_parameters(VIDEO_CS_709, VIDEO_RANGE_PARTIAL,
@@ -582,8 +690,7 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
 	         "\"focusAuto\":%s,\"lens\":%.3f,"
 	         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d,"
-	         "\"bitrateMbps\":%d,"
-	         "\"denoise\":%s,\"denoiseStrength\":%.2f}\n",
+	         "\"bitrateMbps\":%d}\n",
 	         obs_data_get_bool(settings, "exposure_auto") ? "true" : "false",
 	         (int)obs_data_get_int(settings, "iso"),
 	         (int)obs_data_get_int(settings, "shutter"),
@@ -592,10 +699,13 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	         obs_data_get_bool(settings, "wb_auto") ? "true" : "false",
 	         (int)obs_data_get_int(settings, "temp"),
 	         (int)obs_data_get_int(settings, "tint"),
-	         (int)obs_data_get_int(settings, "bitrate"),
-	         obs_data_get_bool(settings, "denoise") ? "true" : "false",
-	         obs_data_get_double(settings, "denoise_strength"));
+	         (int)obs_data_get_int(settings, "bitrate"));
 	s->control_dirty = TRUE;
+
+	/* Denoise runs locally, so it takes effect immediately rather than
+	 * waiting on a round trip to the phone. */
+	s->denoise_enabled = obs_data_get_bool(settings, "denoise");
+	s->denoise_strength = (float)obs_data_get_double(settings, "denoise_strength");
 	LeaveCriticalSection(&s->lock);
 
 	/* Only reconnect when the endpoint actually moved. Dropping the socket
@@ -656,6 +766,8 @@ static void xrcam_destroy(void *data)
 		WaitForSingleObject(s->thread, 5000);
 		CloseHandle(s->thread);
 	}
+	bfree(s->nr_out);
+	bfree(s->nr_prev);
 	DeleteCriticalSection(&s->lock);
 	bfree(s);
 }
@@ -753,10 +865,10 @@ static obs_properties_t *xrcam_get_properties(void *data)
 	p = obs_properties_add_bool(props, "denoise", "Noise Reduction");
 	obs_property_set_modified_callback(p, on_auto_toggled);
 	obs_property_set_long_description(p,
-		"Temporal denoise on the phone, before encoding. Averages each "
-		"pixel with its own history where the image is static, so sensor "
-		"noise cancels while detail is untouched. Moving areas pass "
-		"through unfiltered to avoid trailing.");
+		"Temporal denoise, applied here on the PC. Averages each pixel "
+		"with its own history where the image is static, so sensor noise "
+		"cancels while detail is untouched. Moving areas pass through "
+		"unfiltered to avoid trailing.");
 
 	p = obs_properties_add_float_slider(props, "denoise_strength",
 	                                    "NR Strength", 0.0, 0.95, 0.05);

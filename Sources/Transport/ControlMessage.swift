@@ -20,8 +20,4 @@ struct ControlMessage: Decodable {
 
     /// Target encode bitrate in megabits per second.
     var bitrateMbps: Double?
-
-    /// Temporal noise reduction, applied before encoding.
-    var denoise: Bool?
-    var denoiseStrength: Float?
 }
