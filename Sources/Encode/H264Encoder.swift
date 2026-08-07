@@ -28,6 +28,14 @@ final class H264Encoder {
 
     private static let startCode = Data([0x00, 0x00, 0x00, 0x01])
 
+    /// Access Unit Delimiter (NAL type 9, primary_pic_type 7).
+    ///
+    /// A raw elementary stream has no framing, so a demuxer normally cannot
+    /// tell a frame has ended until it sees the start of the next one — one
+    /// full frame of latency, plus whatever the parser buffers to be sure. An
+    /// AUD marks the boundary explicitly so ffmpeg can cut immediately.
+    private static let accessUnitDelimiter = Data([0x00, 0x00, 0x00, 0x01, 0x09, 0xF0])
+
     init(width: Int32, height: Int32, fps: Int32, bitrate: Int) {
         self.width = width
         self.height = height
@@ -64,6 +72,11 @@ final class H264Encoder {
         // emitted until future frames arrive, which is latency we cannot spend.
         set(created, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(created, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse)
+
+        // Emit every frame as soon as it is encoded. Without this the encoder
+        // may hold frames back to make better rate-control decisions, which is
+        // latency spent on quality we are not asking for.
+        set(created, kVTCompressionPropertyKey_MaxFrameDelayCount, 0 as CFNumber)
         set(created, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
         set(created, kVTCompressionPropertyKey_AverageBitRate, bitrate as CFNumber)
         set(created, kVTCompressionPropertyKey_ExpectedFrameRate, fps as CFNumber)
@@ -119,6 +132,10 @@ final class H264Encoder {
         let keyframe = Self.isKeyframe(sampleBuffer)
         var out = Data()
 
+        // Delimit the access unit up front so the demuxer knows where this
+        // frame begins without waiting for the next one to arrive.
+        out.append(Self.accessUnitDelimiter)
+
         // Parameter sets must precede every keyframe. OBS may attach to the
         // stream at any moment; without a fresh SPS/PPS it cannot initialise a
         // decoder and shows nothing at all.
@@ -127,8 +144,11 @@ final class H264Encoder {
             out.append(Self.parameterSets(from: format))
         }
 
-        out.append(Self.annexB(from: sampleBuffer))
-        guard !out.isEmpty else { return }
+        let slices = Self.annexB(from: sampleBuffer)
+        // Guard on the slice data, not on `out` — that always holds the AUD,
+        // so an empty frame would otherwise ship a bare delimiter.
+        guard !slices.isEmpty else { return }
+        out.append(slices)
 
         onEncodedFrame?(out, keyframe)
     }

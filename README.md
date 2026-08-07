@@ -82,8 +82,25 @@ month. The workflow cancels superseded runs to avoid wasting them.
    - Uncheck **Local File**
    - **Input:** `tcp://127.0.0.1:9000`
    - **Input Format:** `h264`
-   - **FFmpeg Options:** `framerate=30`
+   - **FFmpeg Options:** `framerate=30 probesize=32 analyzeduration=0 fflags=nobuffer flags=low_delay`
+   - **Network Buffering:** drag to **minimum**
    - Check **Restart playback when source becomes active**
+
+### Latency
+
+Out of the box OBS buffers network sources heavily — its default network
+buffering alone is seconds of delay, and ffmpeg adds more while it probes the
+stream. The extra FFmpeg options above matter as much as the URL:
+
+| Option | Effect |
+|---|---|
+| `probesize=32` | Stop inspecting the stream after 32 bytes |
+| `analyzeduration=0` | Do not spend wall-clock time analysing before playback |
+| `fflags=nobuffer` | Do not buffer frames internally |
+| `flags=low_delay` | Ask the decoder not to hold frames back |
+
+**Network Buffering is a separate slider from the FFmpeg options** and is
+usually the single biggest contributor. Set it to the minimum.
 
 **`Input Format` is not optional.** The stream is a raw H.264 elementary
 stream — no container, no header — so ffmpeg cannot probe what it is

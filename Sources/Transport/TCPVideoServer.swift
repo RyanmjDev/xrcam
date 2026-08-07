@@ -35,13 +35,18 @@ final class TCPVideoServer {
     private var listener: NWListener?
     private var connection: NWConnection?
 
-    /// Bytes handed to the socket but not yet written.
+    /// Frames handed to the socket but not yet written.
+    private var pendingFrames = 0
     private var pendingBytes = 0
     private var wasStalled = false
 
-    /// Roughly a third of a second at 25 Mbps. Past this the link is not
-    /// keeping up, and queueing more only converts latency into memory growth.
-    private let maxPendingBytes = 1_000_000
+    /// Latency is bounded in *frames*, not bytes. A byte budget silently means
+    /// a different amount of time at every bitrate — 1 MB is ~0.7s at 12 Mbps
+    /// but ~0.3s at 25 — whereas two frames is ~66ms at 30fps regardless.
+    private let maxPendingFrames = 2
+
+    /// Secondary guard only, for the case where a single frame is enormous.
+    private let maxPendingBytes = 4_000_000
 
     init(port: UInt16 = 9000) {
         self.port = NWEndpoint.Port(rawValue: port)!
@@ -95,6 +100,7 @@ final class TCPVideoServer {
         connection = nil
         listener?.cancel()
         listener = nil
+        pendingFrames = 0
         pendingBytes = 0
         state = .idle
     }
@@ -119,6 +125,7 @@ final class TCPVideoServer {
             guard let self else { return }
             switch newState {
             case .ready:
+                self.pendingFrames = 0
                 self.pendingBytes = 0
                 self.state = .connected
                 // A client that just attached has no parameter sets yet.
@@ -126,6 +133,7 @@ final class TCPVideoServer {
             case .failed, .cancelled:
                 if self.connection === incoming {
                     self.connection = nil
+                    self.pendingFrames = 0
                     self.pendingBytes = 0
                     self.state = self.listener == nil ? .idle : .listening
                 }
@@ -145,7 +153,8 @@ final class TCPVideoServer {
             guard let self, let connection = self.connection,
                   connection.state == .ready else { return }
 
-            if self.pendingBytes + data.count > self.maxPendingBytes {
+            if self.pendingFrames >= self.maxPendingFrames
+                || self.pendingBytes + data.count > self.maxPendingBytes {
                 self.framesDropped += 1
                 self.wasStalled = true
                 return
@@ -158,10 +167,12 @@ final class TCPVideoServer {
                 self.onNeedsKeyframe?()
             }
 
+            self.pendingFrames += 1
             self.pendingBytes += data.count
 
             connection.send(content: data, completion: .contentProcessed { [weak self] error in
                 guard let self else { return }
+                self.pendingFrames -= 1
                 self.pendingBytes -= data.count
 
                 if error != nil {
