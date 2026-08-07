@@ -1,0 +1,139 @@
+import AVFoundation
+import Combine
+import Foundation
+import UIKit
+
+/// Wires capture → encode → transport and exposes state to the UI.
+@MainActor
+final class StreamController: ObservableObject {
+
+    @Published private(set) var isRunning = false
+    @Published private(set) var transport: TCPVideoServer.State = .idle
+    @Published private(set) var statusMessage = "Idle"
+    @Published private(set) var framesSent = 0
+    @Published private(set) var framesDropped = 0
+    @Published private(set) var megabitsPerSecond = 0.0
+    @Published var resolution: CaptureEngine.Resolution = .hd1080
+
+    let capture = CaptureEngine()
+    private var encoder: H264Encoder?
+    private let server = TCPVideoServer(port: 9000)
+
+    private var statsTimer: Timer?
+    private var lastBytes = 0
+
+    init() {
+        server.onStateChange = { [weak self] state in
+            Task { @MainActor in self?.transport = state }
+        }
+        // Fired when a client attaches or the link recovers from a stall.
+        server.onNeedsKeyframe = { [weak self] in
+            self?.encoder?.requestKeyframe()
+        }
+    }
+
+    // MARK: - Control
+
+    func start() async {
+        guard !isRunning else { return }
+
+        guard await Self.requestCameraAccess() else {
+            statusMessage = "Camera access denied — enable it in Settings"
+            return
+        }
+
+        let dimensions = resolution.dimensions
+        let encoder = H264Encoder(width: dimensions.width,
+                                  height: dimensions.height,
+                                  fps: 30,
+                                  bitrate: resolution.defaultBitrate)
+
+        // Encoded frames go straight to the socket. The transport decides what
+        // to drop; the encoder never blocks on the network.
+        encoder.onEncodedFrame = { [weak self] data, isKeyframe in
+            self?.server.send(data, isKeyframe: isKeyframe)
+        }
+
+        capture.onFrame = { [weak encoder] pixelBuffer, pts, duration in
+            encoder?.encode(pixelBuffer, pts: pts, duration: duration)
+        }
+
+        do {
+            try capture.configure(resolution: resolution)
+            try encoder.start()
+        } catch {
+            statusMessage = error.localizedDescription
+            return
+        }
+
+        self.encoder = encoder
+        server.resetCounters()
+        server.start()
+        capture.start()
+
+        // A stream that dies because the screen locked is a bad surprise
+        // partway through a recording.
+        UIApplication.shared.isIdleTimerDisabled = true
+
+        isRunning = true
+        statusMessage = "Waiting for OBS to connect…"
+        startStatsTimer()
+    }
+
+    func stop() {
+        guard isRunning else { return }
+
+        capture.stop()
+        capture.onFrame = nil
+        encoder?.stop()
+        encoder = nil
+        server.stop()
+
+        UIApplication.shared.isIdleTimerDisabled = false
+
+        statsTimer?.invalidate()
+        statsTimer = nil
+
+        isRunning = false
+        megabitsPerSecond = 0
+        statusMessage = "Idle"
+    }
+
+    // MARK: - Stats
+
+    private func startStatsTimer() {
+        lastBytes = 0
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshStats() }
+        }
+    }
+
+    private func refreshStats() {
+        framesSent = server.framesSent
+        framesDropped = server.framesDropped
+
+        let bytes = server.bytesSent
+        let delta = max(0, bytes - lastBytes)
+        lastBytes = bytes
+        megabitsPerSecond = Double(delta) * 8.0 / 1_000_000.0
+
+        switch transport {
+        case .connected:  statusMessage = "Streaming to OBS"
+        case .listening:  statusMessage = "Waiting for OBS to connect…"
+        case .failed(let error): statusMessage = "Transport error: \(error)"
+        case .idle:       statusMessage = "Idle"
+        }
+    }
+
+    private static func requestCameraAccess() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: .video)
+        default:
+            return false
+        }
+    }
+}

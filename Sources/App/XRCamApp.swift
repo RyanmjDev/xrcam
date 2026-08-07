@@ -4,7 +4,7 @@ import SwiftUI
 struct XRCamApp: App {
     var body: some Scene {
         WindowGroup {
-            DiagnosticsView()
+            StreamView()
                 .preferredColorScheme(.dark)
         }
     }

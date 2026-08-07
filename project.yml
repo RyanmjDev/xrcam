@@ -58,6 +58,13 @@ targets:
         NSMicrophoneUsageDescription: >-
           XRCam uses the microphone to capture audio alongside video.
 
+        # The video stream reaches the PC over usbmuxd rather than the LAN, so
+        # this may never be asked for. Declared anyway: if iOS does classify the
+        # listening socket as local network access, an undeclared app fails
+        # silently with no prompt and no error.
+        NSLocalNetworkUsageDescription: >-
+          XRCam streams video to OBS on your computer over the USB cable.
+
         # A camera app must never letterbox, and must not sleep mid-stream.
         UILaunchScreen: {}
         UIRequiresFullScreen: true
