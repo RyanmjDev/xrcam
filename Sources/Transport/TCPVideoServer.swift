@@ -25,6 +25,9 @@ final class TCPVideoServer {
     /// IDR — after dropping frames the decoder needs a fresh reference point.
     var onNeedsKeyframe: (() -> Void)?
 
+    /// A camera-control update arrived from the PC.
+    var onControlMessage: ((ControlMessage) -> Void)?
+
     private(set) var framesSent = 0
     private(set) var framesDropped = 0
     private(set) var bytesSent = 0
@@ -46,6 +49,14 @@ final class TCPVideoServer {
     private var pendingFrames = 0
     private var pendingBytes = 0
     private var wasStalled = false
+
+    /// Partial control line carried between reads — TCP gives no message
+    /// boundaries, so a JSON object can straddle two receives.
+    private var controlBuffer = Data()
+
+    /// A malformed or hostile sender must not be able to grow this without
+    /// bound; any single control line far past this is not one of ours.
+    private let maxControlLine = 8 * 1024
 
     /// Latency is bounded in *frames*, not bytes. A byte budget silently means
     /// a different amount of time at every bitrate — 1 MB is ~0.7s at 12 Mbps
@@ -136,6 +147,8 @@ final class TCPVideoServer {
                 self.pendingBytes = 0
                 // Announce framing before any frame data goes out.
                 incoming.send(content: Self.framingMagic, completion: .idempotent)
+                self.controlBuffer.removeAll(keepingCapacity: true)
+                self.receiveControl(on: incoming)
                 self.state = .connected
                 // A client that just attached has no parameter sets yet.
                 self.onNeedsKeyframe?()
@@ -152,6 +165,46 @@ final class TCPVideoServer {
         }
 
         incoming.start(queue: queue)
+    }
+
+    // MARK: - Receiving control
+
+    /// Reads newline-delimited JSON control lines from the PC.
+    ///
+    /// Re-arms itself after every read; the connection's own state handler
+    /// tears things down, so this simply stops once the socket is gone.
+    private func receiveControl(on connection: NWConnection) {
+        connection.receive(minimumIncompleteLength: 1,
+                           maximumLength: 4096) { [weak self] data, _, isComplete, error in
+            guard let self, self.connection === connection else { return }
+
+            if let data, !data.isEmpty {
+                self.controlBuffer.append(data)
+                self.drainControlLines()
+            }
+
+            guard error == nil, !isComplete else { return }
+            self.receiveControl(on: connection)
+        }
+    }
+
+    private func drainControlLines() {
+        let newline = UInt8(ascii: "\n")
+
+        while let index = controlBuffer.firstIndex(of: newline) {
+            let line = controlBuffer[controlBuffer.startIndex..<index]
+            controlBuffer.removeSubrange(controlBuffer.startIndex...index)
+
+            guard !line.isEmpty,
+                  let message = try? JSONDecoder().decode(ControlMessage.self, from: line)
+            else { continue }
+
+            onControlMessage?(message)
+        }
+
+        if controlBuffer.count > maxControlLine {
+            controlBuffer.removeAll(keepingCapacity: false)
+        }
     }
 
     // MARK: - Sending

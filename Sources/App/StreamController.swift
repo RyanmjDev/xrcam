@@ -31,6 +31,26 @@ final class StreamController: ObservableObject {
         server.onNeedsKeyframe = { [weak self] in
             self?.encoder?.requestKeyframe()
         }
+        server.onControlMessage = { [weak self] message in
+            Task { @MainActor in self?.apply(message) }
+        }
+    }
+
+    /// Applies a control update from the PC.
+    ///
+    /// Mode flags go first: switching a group to manual seeds its values from
+    /// whatever auto had settled on, which would otherwise overwrite the
+    /// values arriving in this same message.
+    private func apply(_ message: ControlMessage) {
+        if let value = message.exposureAuto { controls.exposureAuto = value }
+        if let value = message.focusAuto { controls.focusAuto = value }
+        if let value = message.wbAuto { controls.whiteBalanceAuto = value }
+
+        if let value = message.iso { controls.iso = value }
+        if let value = message.shutter { controls.shutterDenominator = value }
+        if let value = message.lens { controls.lensPosition = value }
+        if let value = message.temp { controls.temperature = value }
+        if let value = message.tint { controls.tint = value }
     }
 
     // MARK: - Control

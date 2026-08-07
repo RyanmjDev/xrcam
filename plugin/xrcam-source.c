@@ -61,6 +61,12 @@ struct xrcam_src {
 	char host[128];
 	int port;
 
+	/* Camera controls, staged here by update() and sent by the worker.
+	 * The worker owns the socket; handing it the payload instead of
+	 * sending from the UI thread keeps all socket use on one thread. */
+	char control_json[512];
+	BOOL control_dirty;
+
 	/* worker thread */
 	HANDLE thread;
 	volatile LONG stop;
@@ -81,6 +87,9 @@ struct xrcam_src {
 	uint32_t stat_frames;
 	uint64_t frame_received_ns;
 };
+
+/* Defined with the property handlers below, but used by the worker above it. */
+static void flush_controls(struct xrcam_src *s, SOCKET sock);
 
 /* ---------------------------------------------------------------- decoder */
 
@@ -450,7 +459,14 @@ static DWORD WINAPI worker(LPVOID param)
 			break;
 		}
 
+		/* Push current camera state to a freshly attached phone. */
+		EnterCriticalSection(&s->lock);
+		s->control_dirty = TRUE;
+		LeaveCriticalSection(&s->lock);
+
 		while (!InterlockedCompareExchange(&s->stop, 0, 0)) {
+			flush_controls(s, sock);
+
 			if (len + RECV_CHUNK > cap) {
 				cap *= 2;
 				buf = brealloc(buf, cap);
@@ -552,16 +568,56 @@ static void xrcam_update(void *data, obs_data_t *settings)
 {
 	struct xrcam_src *s = data;
 
+	char host[128];
+	snprintf(host, sizeof(host), "%s", obs_data_get_string(settings, "host"));
+	int port = (int)obs_data_get_int(settings, "port");
+
 	EnterCriticalSection(&s->lock);
-	snprintf(s->host, sizeof(s->host), "%s",
-	         obs_data_get_string(settings, "host"));
-	s->port = (int)obs_data_get_int(settings, "port");
+	BOOL endpoint_changed = (strcmp(host, s->host) != 0 || port != s->port);
+	memcpy(s->host, host, sizeof(host));
+	s->port = port;
+
+	/* Stage the camera state for the worker to send. */
+	snprintf(s->control_json, sizeof(s->control_json),
+	         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
+	         "\"focusAuto\":%s,\"lens\":%.3f,"
+	         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d}\n",
+	         obs_data_get_bool(settings, "exposure_auto") ? "true" : "false",
+	         (int)obs_data_get_int(settings, "iso"),
+	         (int)obs_data_get_int(settings, "shutter"),
+	         obs_data_get_bool(settings, "focus_auto") ? "true" : "false",
+	         obs_data_get_double(settings, "lens"),
+	         obs_data_get_bool(settings, "wb_auto") ? "true" : "false",
+	         (int)obs_data_get_int(settings, "temp"),
+	         (int)obs_data_get_int(settings, "tint"));
+	s->control_dirty = TRUE;
 	LeaveCriticalSection(&s->lock);
 
-	/* Kick the worker off its current connection so new settings apply. */
-	SOCKET sock = s->sock;
-	if (sock != INVALID_SOCKET)
-		closesocket(sock);
+	/* Only reconnect when the endpoint actually moved. Dropping the socket
+	 * on every slider tick would restart the stream mid-adjustment. */
+	if (endpoint_changed) {
+		SOCKET sock = s->sock;
+		if (sock != INVALID_SOCKET)
+			closesocket(sock);
+	}
+}
+
+/* Send any staged control state. Called from the worker between reads, so
+ * the socket is only ever touched by one thread. */
+static void flush_controls(struct xrcam_src *s, SOCKET sock)
+{
+	char json[sizeof(s->control_json)];
+
+	EnterCriticalSection(&s->lock);
+	BOOL dirty = s->control_dirty;
+	if (dirty) {
+		memcpy(json, s->control_json, sizeof(json));
+		s->control_dirty = FALSE;
+	}
+	LeaveCriticalSection(&s->lock);
+
+	if (dirty)
+		send(sock, json, (int)strlen(json), 0);
 }
 
 static void *xrcam_create(obs_data_t *settings, obs_source_t *source)
@@ -603,14 +659,76 @@ static void xrcam_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_string(settings, "host", "127.0.0.1");
 	obs_data_set_default_int(settings, "port", 9000);
+
+	obs_data_set_default_bool(settings, "exposure_auto", true);
+	obs_data_set_default_int(settings, "iso", 100);
+	obs_data_set_default_int(settings, "shutter", 60);
+	obs_data_set_default_bool(settings, "focus_auto", true);
+	obs_data_set_default_double(settings, "lens", 0.5);
+	obs_data_set_default_bool(settings, "wb_auto", true);
+	obs_data_set_default_int(settings, "temp", 5200);
+	obs_data_set_default_int(settings, "tint", 0);
+}
+
+/* Grey out a group's sliders while it is on auto. */
+static bool on_auto_toggled(obs_properties_t *props, obs_property_t *prop,
+                            obs_data_t *settings)
+{
+	UNUSED_PARAMETER(prop);
+
+	bool exposure_auto = obs_data_get_bool(settings, "exposure_auto");
+	obs_property_set_enabled(obs_properties_get(props, "iso"), !exposure_auto);
+	obs_property_set_enabled(obs_properties_get(props, "shutter"), !exposure_auto);
+
+	bool focus_auto = obs_data_get_bool(settings, "focus_auto");
+	obs_property_set_enabled(obs_properties_get(props, "lens"), !focus_auto);
+
+	bool wb_auto = obs_data_get_bool(settings, "wb_auto");
+	obs_property_set_enabled(obs_properties_get(props, "temp"), !wb_auto);
+	obs_property_set_enabled(obs_properties_get(props, "tint"), !wb_auto);
+
+	return true; /* refresh the dialog */
 }
 
 static obs_properties_t *xrcam_get_properties(void *data)
 {
 	UNUSED_PARAMETER(data);
 	obs_properties_t *props = obs_properties_create();
+
 	obs_properties_add_text(props, "host", "Host", OBS_TEXT_DEFAULT);
 	obs_properties_add_int(props, "port", "Port", 1, 65535, 1);
+
+	obs_property_t *p;
+
+	/* Exposure. Ranges are deliberately generous -- the phone clamps to
+	 * whatever its active format actually accepts, so a wide slider is
+	 * harmless while a too-narrow one would hide usable settings. */
+	p = obs_properties_add_bool(props, "exposure_auto", "Exposure: Auto");
+	obs_property_set_modified_callback(p, on_auto_toggled);
+	obs_properties_add_int_slider(props, "iso", "ISO", 20, 2000, 10);
+
+	p = obs_properties_add_list(props, "shutter", "Shutter",
+	                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	static const int shutters[] = {30, 48, 60, 96, 120, 240, 500, 1000, 2000};
+	for (size_t i = 0; i < sizeof(shutters) / sizeof(shutters[0]); i++) {
+		char label[16];
+		snprintf(label, sizeof(label), "1/%d", shutters[i]);
+		obs_property_list_add_int(p, label, shutters[i]);
+	}
+
+	/* Focus */
+	p = obs_properties_add_bool(props, "focus_auto", "Focus: Auto");
+	obs_property_set_modified_callback(p, on_auto_toggled);
+	obs_properties_add_float_slider(props, "lens", "Focus (near - far)",
+	                                0.0, 1.0, 0.01);
+
+	/* White balance */
+	p = obs_properties_add_bool(props, "wb_auto", "White Balance: Auto");
+	obs_property_set_modified_callback(p, on_auto_toggled);
+	obs_properties_add_int_slider(props, "temp", "Temperature (K)",
+	                              2000, 10000, 50);
+	obs_properties_add_int_slider(props, "tint", "Tint", -150, 150, 1);
+
 	return props;
 }
 
