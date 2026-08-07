@@ -46,6 +46,9 @@ OBS_DECLARE_MODULE()
 /* Frame boundary marker the app emits before every access unit. */
 static const uint8_t AUD[5] = {0x00, 0x00, 0x00, 0x01, 0x09};
 
+/* Sent once by the app on connect; means every frame is length-prefixed. */
+static const uint8_t FRAMING_MAGIC[8] = {'X', 'R', 'C', 'A', 'M', '1', 0, 0};
+
 /* Growable receive buffer; reset if a malformed stream lets it run away. */
 #define RECV_CHUNK   (256 * 1024)
 #define MAX_PENDING  (16 * 1024 * 1024)
@@ -70,6 +73,13 @@ struct xrcam_src {
 	UINT32 disp_w, disp_h;      /* picture size, e.g. 1920x1080 */
 	LONG stride;
 	LONGLONG pts;               /* synthetic input timestamps, 100ns */
+
+	/* Rolling decode+output latency, so the next tuning round is measured
+	 * rather than guessed. Covers only this plugin's own contribution:
+	 * from "frame fully received" to "handed to OBS". */
+	uint64_t stat_ns_total;
+	uint32_t stat_frames;
+	uint64_t frame_received_ns;
 };
 
 /* ---------------------------------------------------------------- decoder */
@@ -231,6 +241,18 @@ static void output_frame(struct xrcam_src *s, IMFSample *sample)
 		                            frame.color_range_min,
 		                            frame.color_range_max);
 		obs_source_output_video(s->source, &frame);
+
+		if (s->frame_received_ns) {
+			s->stat_ns_total += os_gettime_ns() - s->frame_received_ns;
+			if (++s->stat_frames >= 300) {
+				XR_LOG(LOG_INFO,
+				       "decode+output latency: %.1f ms avg over %u frames",
+				       (double)s->stat_ns_total / s->stat_frames / 1e6,
+				       s->stat_frames);
+				s->stat_ns_total = 0;
+				s->stat_frames = 0;
+			}
+		}
 	}
 
 	if (locked2d) {
@@ -418,6 +440,10 @@ static DWORD WINAPI worker(LPVOID param)
 		s->sock = sock;
 		len = 0;
 
+		/* Framing mode is decided by the app's opening magic. Unknown
+		 * until enough bytes arrive to check it. */
+		enum { MODE_UNKNOWN, MODE_FRAMED, MODE_AUD } mode = MODE_UNKNOWN;
+
 		if (FAILED(decoder_create(s))) {
 			closesocket(sock);
 			s->sock = INVALID_SOCKET;
@@ -435,21 +461,66 @@ static DWORD WINAPI worker(LPVOID param)
 				break;
 			len += (size_t)got;
 
-			/* Emit every complete AU: [AUD_n, AUD_n+1). */
-			size_t start = find_aud(buf, len, 0);
-			while (start != SIZE_MAX) {
-				size_t next = find_aud(buf, len, start + sizeof(AUD));
-				if (next == SIZE_MAX)
-					break;
-				feed_access_unit(s, buf + start, next - start);
-				start = next;
+			if (mode == MODE_UNKNOWN && len >= sizeof(FRAMING_MAGIC)) {
+				if (memcmp(buf, FRAMING_MAGIC, sizeof(FRAMING_MAGIC)) == 0) {
+					mode = MODE_FRAMED;
+					memmove(buf, buf + sizeof(FRAMING_MAGIC),
+					        len - sizeof(FRAMING_MAGIC));
+					len -= sizeof(FRAMING_MAGIC);
+					XR_LOG(LOG_INFO, "length-prefixed framing");
+				} else {
+					mode = MODE_AUD;
+					XR_LOG(LOG_WARNING,
+					       "no framing magic -- older app build; "
+					       "falling back to AUD splitting (+1 frame latency)");
+				}
 			}
-			if (start != SIZE_MAX && start > 0) {
-				memmove(buf, buf + start, len - start);
-				len -= start;
-			} else if (start == SIZE_MAX && len > MAX_PENDING) {
-				XR_LOG(LOG_WARNING, "no frame boundary in %zu bytes -- resetting", len);
-				len = 0;
+
+			if (mode == MODE_FRAMED) {
+				/* A frame is complete the moment its declared bytes
+				 * have arrived -- no waiting on the next frame. */
+				for (;;) {
+					if (len < 4)
+						break;
+					uint32_t need = ((uint32_t)buf[0] << 24) |
+					                ((uint32_t)buf[1] << 16) |
+					                ((uint32_t)buf[2] << 8) |
+					                (uint32_t)buf[3];
+					if (need == 0 || need > MAX_PENDING) {
+						XR_LOG(LOG_WARNING,
+						       "bogus frame length %u -- resyncing", need);
+						len = 0;
+						break;
+					}
+					if (len < 4 + (size_t)need)
+						break;
+
+					s->frame_received_ns = os_gettime_ns();
+					feed_access_unit(s, buf + 4, need);
+
+					memmove(buf, buf + 4 + need, len - 4 - need);
+					len -= 4 + need;
+				}
+			} else if (mode == MODE_AUD) {
+				/* Legacy: a frame is only known to have ended when the
+				 * next one begins, costing one frame of latency. */
+				size_t start = find_aud(buf, len, 0);
+				while (start != SIZE_MAX) {
+					size_t next = find_aud(buf, len, start + sizeof(AUD));
+					if (next == SIZE_MAX)
+						break;
+					s->frame_received_ns = os_gettime_ns();
+					feed_access_unit(s, buf + start, next - start);
+					start = next;
+				}
+				if (start != SIZE_MAX && start > 0) {
+					memmove(buf, buf + start, len - start);
+					len -= start;
+				} else if (start == SIZE_MAX && len > MAX_PENDING) {
+					XR_LOG(LOG_WARNING,
+					       "no frame boundary in %zu bytes -- resetting", len);
+					len = 0;
+				}
 			}
 		}
 

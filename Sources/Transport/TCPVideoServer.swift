@@ -29,6 +29,13 @@ final class TCPVideoServer {
     private(set) var framesDropped = 0
     private(set) var bytesSent = 0
 
+    /// Sent once on connect. Its presence tells the native OBS plugin that
+    /// every frame is length-prefixed; without it the plugin falls back to
+    /// splitting on AUDs, which costs a frame of latency because a frame is
+    /// only known to have ended once the next one starts arriving.
+    private static let framingMagic = Data([0x58, 0x52, 0x43, 0x41,
+                                            0x4D, 0x31, 0x00, 0x00]) // "XRCAM1\0\0"
+
     private let port: NWEndpoint.Port
     private let queue = DispatchQueue(label: "dev.ryanmj.xrcam.transport")
 
@@ -127,6 +134,8 @@ final class TCPVideoServer {
             case .ready:
                 self.pendingFrames = 0
                 self.pendingBytes = 0
+                // Announce framing before any frame data goes out.
+                incoming.send(content: Self.framingMagic, completion: .idempotent)
                 self.state = .connected
                 // A client that just attached has no parameter sets yet.
                 self.onNeedsKeyframe?()
@@ -170,7 +179,15 @@ final class TCPVideoServer {
             self.pendingFrames += 1
             self.pendingBytes += data.count
 
-            connection.send(content: data, completion: .contentProcessed { [weak self] error in
+            // Length-prefix and send as one write: Nagle is disabled, so two
+            // sends would put the header and payload in separate packets.
+            var framed = Data(capacity: data.count + 4)
+            withUnsafeBytes(of: UInt32(data.count).bigEndian) {
+                framed.append(contentsOf: $0)
+            }
+            framed.append(data)
+
+            connection.send(content: framed, completion: .contentProcessed { [weak self] error in
                 guard let self else { return }
                 self.pendingFrames -= 1
                 self.pendingBytes -= data.count
