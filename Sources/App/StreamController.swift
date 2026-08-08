@@ -60,6 +60,12 @@ final class StreamController: ObservableObject {
             bitrateMbps = mbps
         }
 
+        // Last, because it may tear down and rebuild the encoder that the
+        // settings above were just applied to.
+        applyFormat(
+            resolution: message.resolution.flatMap(CaptureEngine.Resolution.init(rawValue:)),
+            frameRate: message.fps.flatMap { CaptureEngine.FrameRate(rawValue: Int32($0)) }
+        )
     }
 
     // MARK: - Control
@@ -72,6 +78,26 @@ final class StreamController: ObservableObject {
             return
         }
 
+        guard buildPipeline() else { return }
+
+        server.resetCounters()
+        server.start()
+
+        // A stream that dies because the screen locked is a bad surprise
+        // partway through a recording.
+        UIApplication.shared.isIdleTimerDisabled = true
+
+        isRunning = true
+        startStatsTimer()
+    }
+
+    /// Builds capture + encoder for the current format and starts capturing.
+    ///
+    /// Kept separate from `start()` so a format change can rebuild this half
+    /// while leaving the listener and any connected client untouched — the
+    /// plugin renegotiates on the new SPS rather than reconnecting.
+    @discardableResult
+    private func buildPipeline() -> Bool {
         let dimensions = resolution.dimensions
         let fps = frameRate.rawValue
         // Keep a bitrate already dialled in from OBS across a restart.
@@ -105,7 +131,7 @@ final class StreamController: ObservableObject {
             try encoder.start()
         } catch {
             statusMessage = error.localizedDescription
-            return
+            return false
         }
 
         // Rebind after configuration: switching resolution replaces the active
@@ -116,19 +142,37 @@ final class StreamController: ObservableObject {
         }
 
         self.encoder = encoder
-        server.resetCounters()
-        server.start()
         capture.start()
 
-        // A stream that dies because the screen locked is a bad surprise
-        // partway through a recording.
-        UIApplication.shared.isIdleTimerDisabled = true
+        // A client mid-stream holds parameter sets for the old format and
+        // cannot decode the new one until a fresh IDR arrives.
+        encoder.requestKeyframe()
 
-        isRunning = true
         statusMessage = encoder.rejectedProperties.isEmpty
             ? "Waiting for OBS to connect…"
             : "Encoder rejected: \(encoder.rejectedProperties.joined(separator: ", "))"
-        startStatsTimer()
+        return true
+    }
+
+    /// Applies a format change from OBS, restarting capture and encode if
+    /// running. Both dimensions and frame rate are baked into the encoder, so
+    /// neither can be changed in place.
+    private func applyFormat(resolution newResolution: CaptureEngine.Resolution?,
+                             frameRate newFrameRate: CaptureEngine.FrameRate?) {
+        let targetResolution = newResolution ?? resolution
+        let targetFrameRate = newFrameRate ?? frameRate
+
+        guard targetResolution != resolution || targetFrameRate != frameRate else { return }
+
+        resolution = targetResolution
+        frameRate = targetFrameRate
+        guard isRunning else { return }
+
+        capture.stop()
+        capture.onFrame = nil
+        encoder?.stop()
+        encoder = nil
+        buildPipeline()
     }
 
     func stop() {

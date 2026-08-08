@@ -76,6 +76,8 @@ struct xrcam_src {
 	int cam_tint;
 	BOOL cam_bitrate_auto;
 	int cam_bitrate;
+	char cam_resolution[16];
+	int cam_fps;
 	BOOL control_dirty;
 
 	/* worker thread */
@@ -810,6 +812,9 @@ static void xrcam_update(void *data, obs_data_t *settings)
 	s->cam_tint = (int)obs_data_get_int(settings, "tint");
 	s->cam_bitrate_auto = obs_data_get_bool(settings, "bitrate_auto");
 	s->cam_bitrate = (int)obs_data_get_int(settings, "bitrate");
+	snprintf(s->cam_resolution, sizeof(s->cam_resolution), "%s",
+	         obs_data_get_string(settings, "resolution"));
+	s->cam_fps = (int)obs_data_get_int(settings, "fps");
 	s->control_dirty = TRUE;
 
 	/* These run locally, so they take effect immediately rather than
@@ -851,14 +856,17 @@ static void flush_controls(struct xrcam_src *s, SOCKET sock)
 		         "{\"exposureAuto\":%s,\"iso\":%d,\"shutter\":%d,"
 		         "\"focusAuto\":%s,\"lens\":%.3f,"
 		         "\"wbAuto\":%s,\"temp\":%d,\"tint\":%d,"
-		         "\"bitrateMbps\":%d}\n",
+		         "\"bitrateMbps\":%d,"
+		         "\"resolution\":\"%s\",\"fps\":%d}\n",
 		         s->cam_exposure_auto ? "true" : "false",
 		         s->cam_iso, s->cam_shutter,
 		         s->cam_focus_auto ? "true" : "false",
 		         s->cam_lens,
 		         s->cam_wb_auto ? "true" : "false",
 		         s->cam_temp, s->cam_tint,
-		         bitrate);
+		         bitrate,
+		         s->cam_resolution[0] ? s->cam_resolution : "1080p",
+		         s->cam_fps > 0 ? s->cam_fps : 30);
 	}
 	LeaveCriticalSection(&s->lock);
 
@@ -916,6 +924,8 @@ static void xrcam_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "wb_auto", true);
 	obs_data_set_default_int(settings, "temp", 5200);
 	obs_data_set_default_int(settings, "tint", 0);
+	obs_data_set_default_string(settings, "resolution", "1080p");
+	obs_data_set_default_int(settings, "fps", 30);
 	obs_data_set_default_bool(settings, "bitrate_auto", true);
 	obs_data_set_default_int(settings, "bitrate", 60);
 	obs_data_set_default_bool(settings, "denoise", false);
@@ -961,6 +971,25 @@ static obs_properties_t *xrcam_get_properties(void *data)
 	obs_properties_add_int(props, "port", "Port", 1, 65535, 1);
 
 	obs_property_t *p;
+
+	/* Capture format. Changing either restarts capture and the encoder on
+	 * the phone -- expect a brief black frame, not a reconnect. */
+	p = obs_properties_add_list(props, "resolution", "Resolution",
+	                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, "1080p", "1080p");
+	obs_property_list_add_string(p, "4K", "4K");
+	obs_property_set_long_description(p,
+		"1080p60 is usually the better choice for streaming: motion is "
+		"what viewers notice, almost nobody watches above 1080p, and 4K "
+		"pushes both the phone and this machine's software decoder hard.");
+
+	p = obs_properties_add_list(props, "fps", "Frame Rate",
+	                            OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
+	obs_property_list_add_int(p, "30 fps", 30);
+	obs_property_list_add_int(p, "60 fps", 60);
+	obs_property_set_long_description(p,
+		"At 60fps the slowest usable shutter becomes 1/60 rather than "
+		"1/30 -- one stop less light, so ISO and noise rise.");
 
 	/* USB 2.0 carries ~280 Mb/s, so the cable is never the limit here --
 	 * this is purely how many bits the scene is worth. Detailed frames

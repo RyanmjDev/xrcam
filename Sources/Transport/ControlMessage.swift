@@ -20,4 +20,10 @@ struct ControlMessage: Decodable {
 
     /// Target encode bitrate in megabits per second.
     var bitrateMbps: Double?
+
+    /// Capture format. Unlike the settings above, changing either of these
+    /// replaces the active capture format and the encoder's dimensions, so
+    /// applying them restarts the pipeline rather than adjusting it.
+    var resolution: String?   // "1080p" | "4K"
+    var fps: Int?             // 30 | 60
 }
