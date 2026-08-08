@@ -125,7 +125,9 @@ final class StreamController: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = true
 
         isRunning = true
-        statusMessage = "Waiting for OBS to connect…"
+        statusMessage = encoder.rejectedProperties.isEmpty
+            ? "Waiting for OBS to connect…"
+            : "Encoder rejected: \(encoder.rejectedProperties.joined(separator: ", "))"
         startStatsTimer()
     }
 

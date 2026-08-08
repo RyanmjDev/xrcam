@@ -26,6 +26,10 @@ final class H264Encoder {
     /// to be an IDR so a re-joining decoder is not stuck on a dangling GOP.
     private var forceKeyframeNext = false
 
+    /// Properties this device would not accept, surfaced in the UI so a
+    /// misconfigured encoder is visible rather than silent.
+    private(set) var rejectedProperties: [String] = []
+
     private static let startCode = Data([0x00, 0x00, 0x00, 0x01])
 
     /// Access Unit Delimiter (NAL type 9, primary_pic_type 7).
@@ -103,16 +107,10 @@ final class H264Encoder {
         set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 2) as CFNumber)
         set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2 as CFNumber)
 
-        // Cap how much the encoder may emit in any one-second window.
-        //
-        // Without this, a keyframe is emitted at whatever size it needs and
-        // arrives as a burst many times a normal frame. On a link paced for
-        // ~33ms frames that burst is a visible hitch, once per GOP. The limit
-        // forces the encoder to spend slightly less on the keyframe and
-        // spread the cost, trading a little quality for even delivery.
-        let burstBytes = Int(Double(bitrate) / 8.0 * 1.4)
-        set(created, kVTCompressionPropertyKey_DataRateLimits,
-            [burstBytes, 1] as CFArray)
+        // DataRateLimits would be the textbook way to stop keyframes arriving
+        // as a burst, but setting it crashed on Start rather than returning an
+        // error, so it is deliberately not used. The burst is instead absorbed
+        // by a deeper send queue in the transport.
 
         VTCompressionSessionPrepareToEncodeFrames(created)
         session = created
@@ -288,8 +286,16 @@ final class H264Encoder {
 
     // MARK: - Helpers
 
+    /// Records rejected properties instead of discarding the status.
+    ///
+    /// Every property here was previously set and its result thrown away, so
+    /// an unsupported one failed silently and the encoder ran misconfigured
+    /// with no indication anywhere.
     private func set(_ session: VTCompressionSession, _ key: CFString, _ value: CFTypeRef) {
-        VTSessionSetProperty(session, key: key, value: value)
+        let status = VTSessionSetProperty(session, key: key, value: value)
+        if status != noErr {
+            rejectedProperties.append("\(key) (\(status))")
+        }
     }
 
     enum EncoderError: Error, LocalizedError {
