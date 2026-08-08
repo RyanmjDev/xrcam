@@ -60,8 +60,15 @@ final class TCPVideoServer {
 
     /// Latency is bounded in *frames*, not bytes. A byte budget silently means
     /// a different amount of time at every bitrate — 1 MB is ~0.7s at 12 Mbps
-    /// but ~0.3s at 25 — whereas two frames is ~66ms at 30fps regardless.
-    private let maxPendingFrames = 2
+    /// but ~0.3s at 25 — whereas three frames is ~50ms at 60fps regardless.
+    ///
+    /// Three rather than two: a keyframe is several times a normal frame, and
+    /// at two the queue filled behind every one, dropping the frames that
+    /// followed it and turning each GOP boundary into a stutter.
+    private let maxPendingFrames = 3
+
+    /// Throttles keyframe requests; see the recovery path in `send`.
+    private var lastKeyframeRequest: UInt64 = 0
 
     /// Secondary guard only, for the case where a single frame is enormous.
     private let maxPendingBytes = 4_000_000
@@ -218,20 +225,24 @@ final class TCPVideoServer {
             if self.pendingFrames >= self.maxPendingFrames
                 || self.pendingBytes + data.count > self.maxPendingBytes {
                 self.framesDropped += 1
-                // Ask for an IDR on the way *into* the stall, not just on the
-                // way out. A dropped frame leaves the decoder without a
-                // reference immediately, so the sooner a keyframe is queued
-                // the shorter the visible corruption.
-                if !self.wasStalled {
-                    self.wasStalled = true
-                    self.onNeedsKeyframe?()
-                }
+                self.wasStalled = true
                 return
             }
 
+            // Only on recovery, and at most once a second.
+            //
+            // Requesting an IDR on *entering* a stall created a feedback
+            // loop: a drop triggered a keyframe, the keyframe was large
+            // enough to cause more drops, which triggered more keyframes.
+            // Keyframes are the expensive thing here, so asking for them
+            // under congestion is precisely backwards.
             if self.wasStalled {
                 self.wasStalled = false
-                self.onNeedsKeyframe?()
+                let now = DispatchTime.now().uptimeNanoseconds
+                if now &- self.lastKeyframeRequest > 1_000_000_000 {
+                    self.lastKeyframeRequest = now
+                    self.onNeedsKeyframe?()
+                }
             }
 
             self.pendingFrames += 1

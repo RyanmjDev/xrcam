@@ -103,6 +103,17 @@ final class H264Encoder {
         set(created, kVTCompressionPropertyKey_MaxKeyFrameInterval, (fps * 2) as CFNumber)
         set(created, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 2 as CFNumber)
 
+        // Cap how much the encoder may emit in any one-second window.
+        //
+        // Without this, a keyframe is emitted at whatever size it needs and
+        // arrives as a burst many times a normal frame. On a link paced for
+        // ~33ms frames that burst is a visible hitch, once per GOP. The limit
+        // forces the encoder to spend slightly less on the keyframe and
+        // spread the cost, trading a little quality for even delivery.
+        let burstBytes = Int(Double(bitrate) / 8.0 * 1.4)
+        set(created, kVTCompressionPropertyKey_DataRateLimits,
+            [burstBytes, 1] as CFArray)
+
         VTCompressionSessionPrepareToEncodeFrames(created)
         session = created
     }
